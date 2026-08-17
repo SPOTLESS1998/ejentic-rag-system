@@ -1,0 +1,38 @@
+[
+    {
+        "text": "Ejentic AI is a premier Enterprise AI agency dedicated to building advanced, scalable, and secure agentic workflows for modern businesses. We specialize in Retrieval-Augmented Generation (RAG), Autonomous AI Agents, and Custom Large Language Model (LLM) fine-tuning.",
+        "clearance": "public"
+    },
+    {
+        "text": "Core Offer 1: The Ejentic AI Knowledge Core. This is a fully managed, enterprise-grade hybrid RAG system designed to securely index your company's entire internal knowledge base. It uses Pinecone for vector storage and supports both cloud and on-premise deployments.",
+        "clearance": "public"
+    },
+    {
+        "text": "Core Offer 2: Autonomous HR & Customer Success Agents. We build bespoke AI agents capable of replacing level-1 support and internal HR ticketing. These agents feature deep tool integration, meaning they can query SQL databases, send emails, and schedule meetings autonomously.",
+        "clearance": "public"
+    },
+    {
+        "text": "Core Offer 3: The Ejentic AI Academy. A comprehensive training program designed to upskill corporate teams. We offer intensive 4-week bootcamps covering Prompt Engineering, RAG Architectures, and the fundamentals of LangChain and LlamaIndex.",
+        "clearance": "public"
+    },
+    {
+        "text": "Ejentic AI Technical Expertise: Our tech stack relies heavily on Python, FastAPI, Next.js for frontends, Pinecone for vector DBs, and LlamaIndex for orchestration. We primarily leverage NVIDIA NIM microservices and Llama-3.1 models for maximum reasoning efficiency.",
+        "clearance": "public"
+    },
+    {
+        "text": "Ejentic AI Employee Handbook: Core Hours are 10:00 AM to 3:00 PM EST. All employees are required to use 1Password for credential management. The corporate VPN must be active when accessing staging environments.",
+        "clearance": "internal"
+    },
+    {
+        "text": "Internal Project Delta: Ejentic AI is currently developing a secret project named Delta, which aims to create a fully autonomous coding agent capable of resolving 50% of GitHub issues without human intervention. ETA for beta release is Q4 2026.",
+        "clearance": "internal"
+    },
+    {
+        "text": "Executive Financial Data Q2: The Ejentic AI Knowledge Core generated $2.4M in recurring revenue. The total operating expenses for cloud infrastructure were $310k. We are projecting a 40% growth in Q3 due to the new NVIDIA partnership.",
+        "clearance": "executive"
+    },
+    {
+        "text": "Executive Strategy 2027: The executive board has approved a potential acquisition target, 'OmniScrape Solutions', to bolster our data ingestion capabilities using Firecrawl. The maximum bid authorized is $12M.",
+        "clearance": "executive"
+    }
+]

@@ -1,0 +1,31 @@
+# Ejentic AI - Internal Knowledge Base & Company Overview
+
+## About Us
+Ejentic AI is a premier Artificial Intelligence Agency that specializes in building autonomous, hyper-intelligent agentic workflows for enterprise clients. We sit at the cutting-edge intersection of Machine Learning, Automation, and Next-Generation Web Development. Our mission is to bridge the gap between complex AI research and practical, revenue-generating business solutions.
+
+## Core Services
+1. **Autonomous Lead Generation Pipelines**: We build custom agents that scrape the web, identify ideal customer profiles, enrich lead data, and draft personalized outreach emails entirely autonomously.
+2. **Enterprise RAG Systems**: We create highly secure, hallucination-free Retrieval-Augmented Generation systems using NVIDIA NIM endpoints and Llama 3.1. These systems allow companies to chat with their proprietary internal data securely.
+3. **AI-Powered SaaS Architecture**: We design and deploy full-stack applications with beautiful, dynamic Next.js interfaces powered by Python/FastAPI AI backends.
+
+## Our Philosophy (The Hybrid Approach)
+We strictly adhere to a hybrid development philosophy:
+- **Custom Code for Core Intelligence**: We always use custom Python code (FastAPI, LlamaIndex, LangChain) for the core RAG engines and user-facing SaaS platforms. This ensures maximum scalability, robust security, and full intellectual property ownership for our clients.
+- **No-Code for Peripheral Automations**: We utilize tools like n8n exclusively for background tasks, such as CRM integrations and internal routing, allowing us to build fast without sacrificing the integrity of the core AI brain.
+
+## Technology Stack
+- **Frontend**: Next.js 15 (App Router), TailwindCSS, Framer Motion, Vanilla CSS (for ultra-premium aesthetics).
+- **Backend**: Python 3.11, FastAPI, LlamaIndex, Pinecone Vector Databases.
+- **AI Models**: We specialize in integrating NVIDIA NIM microservices (NV-Embed-QA, meta/llama-3.1-70b-instruct) for blazing fast inference.
+
+## Pricing and Packages
+- **The Prototype ($5,000)**: A rapid 2-week MVP build to prove the concept of an AI workflow.
+- **The Core System ($15,000)**: A robust, production-ready AI agent or RAG system integrated into a company's website or internal portal.
+- **Enterprise Agency Retainer ($5,000/month)**: Ongoing maintenance, prompt engineering optimizations, vector database management, and priority support.
+
+## FAQ
+**Q: Do you use standard OpenAI models?**
+A: We can, but we highly recommend our optimized NVIDIA NIM architecture using Llama 3.1 70B for superior speed and data privacy for enterprise use cases.
+
+**Q: How do you prevent your RAG systems from hallucinating?**
+A: We rigorously chunk our vector data to 256 tokens to perfectly align with NVIDIA's tokenizer window, and we implement strict prompt boundaries so the agent refuses to answer questions outside of the retrieved documents.

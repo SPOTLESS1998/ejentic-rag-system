@@ -1,0 +1,71 @@
+{
+  "name": "Ejentic AI - Telegram RAG Orchestration",
+  "nodes": [
+    {
+      "parameters": {
+        "httpMethod": "POST",
+        "path": "telegram-webhook",
+        "options": {}
+      },
+      "id": "e1f13b2c-1a2b-4c3d-9e4f-5a6b7c8d9e0f",
+      "name": "Telegram Webhook",
+      "type": "n8n-nodes-base.webhook",
+      "typeVersion": 1,
+      "position": [ 250, 400 ]
+    },
+    {
+      "parameters": {
+        "method": "POST",
+        "url": "http://backend:8002/api/rag",
+        "sendBody": true,
+        "specifyBody": "json",
+        "jsonBody": "={\n  \"query\": \"{{$json.body.message.text}}\",\n  \"clearance_level\": \"guest\",\n  \"platform\": \"n8n_Telegram\"\n}",
+        "options": {}
+      },
+      "id": "a3b35d4e-3c4d-6e5f-1a6b-7c8d9e0f1a2b",
+      "name": "Ejentic FastAPI Brain",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4,
+      "position": [ 600, 400 ]
+    },
+    {
+      "parameters": {
+        "chatId": "={{$node[\"Telegram Webhook\"].json[\"body\"][\"message\"][\"chat\"][\"id\"]}}",
+        "text": "={{$json[\"response\"]}}",
+        "additionalFields": {}
+      },
+      "id": "b4c46e5f-4d5e-7f6a-2b7c-8d9e0f1a2b3c",
+      "name": "Reply to Telegram",
+      "type": "n8n-nodes-base.telegram",
+      "typeVersion": 1,
+      "position": [ 950, 400 ]
+    }
+  ],
+  "connections": {
+    "Telegram Webhook": {
+      "main": [
+        [
+          {
+            "node": "Ejentic FastAPI Brain",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Ejentic FastAPI Brain": {
+      "main": [
+        [
+          {
+            "node": "Reply to Telegram",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {},
+  "versionId": "f7g8h9i0-j1k2-l3m4-n5o6-p7q8r9s0t1u2"
+}

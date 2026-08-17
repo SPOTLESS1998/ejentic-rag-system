@@ -1,0 +1,32 @@
+# --- Secrets: NEVER commit ---
+.env
+.env.*
+*.key
+
+# --- Python runtime ---
+venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# --- Local data / logs / audit db (regenerable, may hold user content) ---
+*.db
+*.log
+log.txt
+pip.log
+data/uploads/
+
+# --- Client knowledge sources (real PDFs/docs may be proprietary/sensitive) ---
+# The folder structure + its README are tracked as an example, but anything you
+# drop inside it, and the JSON generated from it, are ignored so they never get
+# committed by accident. (The shipped demo ejentic_knowledge.json is fake data
+# and stays tracked.)
+knowledge_sources/*
+!knowledge_sources/README.md
+knowledge_from_docs.json
+
+# --- Eval run artifact (regenerated each run; eval_cases.json IS tracked) ---
+eval_report.json
+
+# --- OS noise ---
+.DS_Store

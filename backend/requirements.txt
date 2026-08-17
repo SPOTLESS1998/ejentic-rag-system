@@ -1,0 +1,29 @@
+# ---- Web server ----
+fastapi
+uvicorn
+python-multipart          # required by FastAPI for /upload (multipart form data)
+
+# ---- Config ----
+python-dotenv
+
+# ---- Audit log (database.py) ----
+sqlalchemy                # async ORM used by database.py  (was missing -> import crash)
+aiosqlite                 # async SQLite driver for  sqlite+aiosqlite://  (was missing)
+
+# ---- RAG core: LlamaIndex + NVIDIA NIM + Pinecone ----
+llama-index
+llama-index-vector-stores-pinecone
+llama-index-llms-nvidia
+llama-index-embeddings-nvidia
+llama-index-postprocessor-nvidia-rerank   # primary cross-encoder reranker (was missing -> silent downgrade)
+
+# ---- Ingestion helpers ----
+beautifulsoup4
+requests
+pypdf
+
+# ---- Optional: local reranker fallback ----
+# Only needed if you want reranking to keep working when the NVIDIA rerank API is
+# unreachable. Pulls in torch (large download). The pipeline already degrades to
+# LLMRerank without it, so it's left off by default to keep installs light.
+# sentence-transformers
