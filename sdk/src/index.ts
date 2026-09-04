@@ -1,7 +1,7 @@
-import { RAGClient } from "./client";
-import { ClientSummary, RAGQueryOptions } from "./types";
+import { RAGClient } from "./client.js";
+import { ClientSummary, RAGQueryOptions } from "./types.js";
 
-export { RAGClient } from "./client";
+export { RAGClient } from "./client.js";
 export type {
   ChatStreamEvent,
   ClientSummary,
@@ -14,7 +14,7 @@ export type {
   RAGResponse,
   RAGUploadResponse,
   TokenUsage,
-} from "./types";
+} from "./types.js";
 
 /**
  * Simplest possible entry point: build a client for the DEFAULT RAG backend.
@@ -42,4 +42,4 @@ export function rag(): RAGClient {
   return _default;
 }
 
-export { DEFAULT_CLIENT_ID, isClientRegistered, listClients, getClient } from "./registry";
+export { DEFAULT_CLIENT_ID, isClientRegistered, listClients, getClient } from "./registry.js";

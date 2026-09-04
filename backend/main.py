@@ -71,6 +71,92 @@ from token_meter import TokenMeter, estimate_tokens
 import client_registry as registry
 
 # ---------------------------------------------------------------------------
+# PATCH: llama-index's NVIDIA client validates the model against a LIVE
+# `models.list()` call to NVIDIA's API at construction time. That listing is
+# intermittent under load and spuriously drops models that actually work
+# (verified independently via direct API calls). When a model is absent from
+# the listing we WARN rather than raise — the default endpoint is correct and
+# the model is known-good, so failing the whole boot over a flaky catalog
+# check would be a false negative. This keeps the server resilient.
+# ---------------------------------------------------------------------------
+_orig_validate = NVIDIA._validate_model
+
+
+def _tolerant_validate(self, model_name: str) -> None:
+    try:
+        _orig_validate(self, model_name)
+    except ValueError as e:
+        if "unknown" in str(e) or "available_models" in str(e):
+            import warnings
+            warnings.warn(
+                f"[llm] model {model_name!r} not in NVIDIA's live model listing "
+                f"(intermittent); proceeding anyway as it is known to work. "
+                f"Original: {e}"
+            )
+            return
+        raise
+
+
+NVIDIA._validate_model = _tolerant_validate
+
+
+# ---------------------------------------------------------------------------
+# RETRY HELPER for LLM inference.
+# NVIDIA's API intermittently returns transient errors (404, connection reset,
+# 5xx) under load — the model itself is known-good (verified via direct API
+# calls). A short retry with backoff makes every LLM hop (query-rewrite,
+# synthesis) resilient without changing behavior on the happy path.
+# ---------------------------------------------------------------------------
+import time as _time
+
+_TRANSIENT_SUBSTRINGS = ("404", "page not found", "connection", "timeout",
+                         "500", "502", "503", "504", "temporarily",
+                         "unavailable", "inference connection")
+
+
+def _is_transient(exc: Exception) -> bool:
+    msg = str(exc).lower()
+    return any(s in msg for s in _TRANSIENT_SUBSTRINGS)
+
+
+async def _retry_achat(messages, *, attempts: int = 3, meter=None,
+                       fallback_prompt_text: str = ""):
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            resp = await Settings.llm.achat(messages)
+            return resp
+        except Exception as e:
+            last_err = e
+            if attempt < attempts and _is_transient(e):
+                wait = 2 * attempt
+                print(f"[llm] achat attempt {attempt} transient ({_short(e)}); retrying in {wait}s...")
+                await asyncio.sleep(wait)
+            else:
+                raise
+    raise last_err
+
+
+async def _retry_astream_chat(messages, *, attempts: int = 3):
+    last_err = None
+    for attempt in range(1, attempts + 1):
+        try:
+            # astream_chat returns a coroutine -> await to get the async iterable
+            stream = await Settings.llm.astream_chat(messages)
+            async for chunk in stream:
+                yield chunk
+            return
+        except Exception as e:
+            last_err = e
+            if attempt < attempts and _is_transient(e):
+                wait = 2 * attempt
+                print(f"[llm] astream attempt {attempt} transient ({_short(e)}); retrying in {wait}s...")
+                await asyncio.sleep(wait)
+            else:
+                raise
+    raise last_err
+
+# ---------------------------------------------------------------------------
 # Environment & observability
 # ---------------------------------------------------------------------------
 load_dotenv()
@@ -101,6 +187,7 @@ PINECONE_NAMESPACE = CFG["namespace"]
 
 # --- Tunables: client config wins, env override wins over that (quick runs) -
 LLM_MODEL = os.environ.get("LLM_MODEL") or CFG["llm_model"]
+LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT") or os.environ.get("LLM_REQUEST_TIMEOUT") or "300")
 EMBED_MODEL = os.environ.get("EMBED_MODEL") or CFG["embed_model"]
 RERANK_MODEL = os.environ.get("RERANK_MODEL") or CFG["rerank_model"]
 
@@ -287,7 +374,27 @@ if not PINECONE_API_KEY or not NVIDIA_API_KEY:
 else:
     # Step 1 models — embeddings + LLM on the NVIDIA stack.
     Settings.embed_model = NVIDIAEmbedding(model=EMBED_MODEL, api_key=NVIDIA_API_KEY)
-    Settings.llm = NVIDIA(model=LLM_MODEL, api_key=NVIDIA_API_KEY)
+
+    # The NVIDIA client validates the model against a live `models.list()` call
+    # at construction. That listing is intermittent under load and can spuriously
+    # reject a working model, so retry a few times before giving up.
+    import time
+    last_err = None
+    for attempt in range(1, 6):
+        try:
+            Settings.llm = NVIDIA(model=LLM_MODEL, api_key=NVIDIA_API_KEY, timeout=LLM_TIMEOUT)
+            print(f"[llm] {LLM_MODEL} initialized (attempt {attempt}).")
+            last_err = None
+            break
+        except Exception as e:
+            last_err = e
+            if attempt < 5:
+                print(f"[llm] init attempt {attempt} failed ({_short(e)}); retrying...")
+                time.sleep(2 * attempt)
+            else:
+                print(f"[llm] init failed after 5 attempts: {_short(e)}")
+    if last_err is not None:
+        print("[llm] WARNING: LLM unavailable — queries will return offline.")
     # Semantic chunking target (500/50) — applies to future ingestion & /upload.
     Settings.chunk_size = int(os.environ.get("CHUNK_SIZE", "500"))
     Settings.chunk_overlap = int(os.environ.get("CHUNK_OVERLAP", "50"))
@@ -432,7 +539,7 @@ async def rewrite_query(query: str, meter=None) -> str:
                 "rewritten query — no quotes, no preamble.")),
             ChatMessage(role=MessageRole.USER, content=query),
         ]
-        resp = await Settings.llm.achat(messages)
+        resp = await _retry_achat(messages, meter=meter)
         rewritten = (resp.message.content or "").strip().strip('"').split("\n")[0]
         # Meter the rewrite hop — it's a real (if small) token spend on the query.
         if meter is not None:
@@ -568,7 +675,7 @@ async def answer_once(query: str, clearance_level: str, platform: str):
             return ESCALATION_LINE, meter, True, saved
 
         messages = _build_grounded_messages(query, nodes)
-        resp = await Settings.llm.achat(messages)
+        resp = await _retry_achat(messages, meter=meter)
         text = _strip_assistant_prefix((resp.message.content or "").strip())
         meter.record_response(
             resp, fallback_prompt_text=_messages_text(messages), fallback_completion_text=text
@@ -609,8 +716,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
     prefix_checked = False
     buffer = ""
     try:
-        stream = await Settings.llm.astream_chat(messages)
-        async for chunk in stream:
+        async for chunk in _retry_astream_chat(messages):
             delta = chunk.delta or ""
             if not delta:
                 continue

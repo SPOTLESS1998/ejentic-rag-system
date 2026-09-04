@@ -1,5 +1,5 @@
-import { RAGClient } from "./client";
-import { ClientSummary } from "./types";
+import { RAGClient } from "./client.js";
+import { ClientSummary } from "./types.js";
 
 /**
  * Lightweight SDK-side registry of known Ejentic RAG deployments.

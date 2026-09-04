@@ -50,10 +50,10 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "index_name": "ejentic-global",
     "namespace": "ejentic-internal",
     # --- Models (NVIDIA NIM) ---
-    "embed_model": "nvidia/nv-embedqa-e5-v5",
-    "embed_dim": 1024,
-    "llm_model": "meta/llama-3.1-70b-instruct",
-    "rerank_model": "nvidia/nv-rerankqa-mistral-4b-v3",
+    "embed_model": "nvidia/nemotron-3-embed-1b",
+    "embed_dim": 2048,
+    "llm_model": "mistralai/mistral-nemotron",
+    "rerank_model": "nvidia/nv-rerankqa-mistral-4b-v3",  # EOL on NIM as of 2026-09; falls back to BM25
     # --- Retrieval tunables ---
     "retrieve_top_k": 10,          # wide net for recall
     "rerank_top_n": 4,             # tight set for precision/tokens

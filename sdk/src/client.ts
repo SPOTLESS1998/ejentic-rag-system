@@ -59,7 +59,7 @@ export class RAGClient {
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
     this.client = opts.client;
     this.platform = opts.platform ?? "SDK";
-    this.timeoutMs = opts.timeoutMs ?? 30_000;
+    this.timeoutMs = opts.timeoutMs ?? 300_000;
     this.fetchImpl = opts.fetchImpl ?? ((...args) => fetch(...args));
   }
 
