@@ -1,0 +1,32 @@
+{
+  "name": "@ejentic/rag-sdk",
+  "version": "0.1.0",
+  "description": "TypeScript client SDK for the Ejentic Enterprise RAG API (FastAPI backend). Gives every Ejentic system (Next.js apps, agents, n8n-less services) one typed, uniform way to query the RAG brain.",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./registry": {
+      "types": "./dist/registry.d.ts",
+      "import": "./dist/registry.js"
+    }
+  },
+  "files": ["dist", "src"],
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
+  },
+  "engines": {
+    "node": ">=18"
+  },
+  "devDependencies": {
+    "@types/node": "^20.14.0",
+    "typescript": "^5.5.4",
+    "vitest": "^2.1.9"
+  }
+}

@@ -2,6 +2,12 @@
 
 import { useState, useRef, useEffect } from "react";
 
+// Backend base URL. docker-compose sets NEXT_PUBLIC_BACKEND_URL for the
+// container; locally it falls back to the server's real port (8002).
+const BACKEND_URL =
+  (typeof process !== "undefined" && process.env?.NEXT_PUBLIC_BACKEND_URL) ||
+  "http://localhost:8002";
+
 export default function Home() {
   const [messages, setMessages] = useState<{ role: string; content: string }[]>([
     { role: "assistant", content: "Good day. I am the Ejentic AI Executive RAG System. How may I assist you with your business needs today?" }
@@ -33,7 +39,7 @@ export default function Home() {
     formData.append("file", file);
 
     try {
-      const res = await fetch("http://localhost:8015/upload", {
+      const res = await fetch(`${BACKEND_URL}/upload`, {
         method: "POST",
         body: formData,
       });
@@ -68,8 +74,8 @@ export default function Home() {
     setIsLoading(true);
 
     try {
-      // Connect to the backend on port 8015
-      const res = await fetch("http://localhost:8015/chat", {
+      // Connect to the RAG backend (SSE chat stream).
+      const res = await fetch(`${BACKEND_URL}/chat`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ query: userMessage, clearance_level: clearance }),

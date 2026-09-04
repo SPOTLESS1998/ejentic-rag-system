@@ -43,13 +43,22 @@ from llama_index.embeddings.nvidia import NVIDIAEmbedding
 
 load_dotenv()
 
-# --- Config (matches the server's expectations in main.py) ------------------
+# --- Config: the active client registry is the single source of truth ------
+# The server boots from backend/clients/<RAG_CLIENT>.json; ingestion MUST use
+# the same client so vectors land in the same index/namespace with the same
+# embed model. Env vars still win for quick one-off overrides.
+import client_registry as registry
+
+RAG_CLIENT = os.environ.get("RAG_CLIENT", "").strip() or registry.active_client_id()
+CFG = registry.get_client(RAG_CLIENT)
+
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
-INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "ejentic-global")
-NAMESPACE = os.environ.get("PINECONE_NAMESPACE", "ejentic-internal")
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "nvidia/nv-embedqa-e5-v5")
-EMBED_DIM = 1024  # nv-embedqa-e5-v5 output dimension; must match the index metric/space
+INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME") or CFG["index_name"]
+NAMESPACE = os.environ.get("PINECONE_NAMESPACE") or CFG["namespace"]
+EMBED_MODEL = os.environ.get("EMBED_MODEL") or CFG["embed_model"]
+EMBED_DIM = CFG["embed_dim"]  # must match the index metric/space
+CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE") or CFG["chunk_size"])
 
 # The only clearance levels the retrieval layer understands. Any other value is
 # a typo that would silently make a document unreachable — so we reject it.
@@ -145,7 +154,7 @@ def ingest(path: str, append: bool) -> None:
 
     # Embeddings must match the model the SERVER queries with, or scores are junk.
     Settings.embed_model = NVIDIAEmbedding(model=EMBED_MODEL, api_key=NVIDIA_API_KEY)
-    Settings.chunk_size = 512  # records are short; this keeps each one whole
+    Settings.chunk_size = CHUNK_SIZE  # short records stay whole; per-client override
 
     documents = load_and_validate(path)
 

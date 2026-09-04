@@ -68,6 +68,7 @@ from pinecone import Pinecone
 
 from database import init_db, log_query, get_token_metrics
 from token_meter import TokenMeter, estimate_tokens
+import client_registry as registry
 
 # ---------------------------------------------------------------------------
 # Environment & observability
@@ -87,37 +88,46 @@ if os.environ.get("LANGCHAIN_API_KEY"):
 PINECONE_API_KEY = os.environ.get("PINECONE_API_KEY")
 NVIDIA_API_KEY = os.environ.get("NVIDIA_API_KEY")
 GOOGLE_API_KEY = os.environ.get("GOOGLE_API_KEY")  # reserved; kept for parity with .env
-INDEX_NAME = os.environ.get("PINECONE_INDEX_NAME", "ejentic-global")
-PINECONE_NAMESPACE = os.environ.get("PINECONE_NAMESPACE", "ejentic-internal")
 
-# --- Tunables (env-overridable; safe production defaults) -------------------
-LLM_MODEL = os.environ.get("LLM_MODEL", "meta/llama-3.1-70b-instruct")
-EMBED_MODEL = os.environ.get("EMBED_MODEL", "nvidia/nv-embedqa-e5-v5")
-RERANK_MODEL = os.environ.get("RERANK_MODEL", "nvidia/nv-rerankqa-mistral-4b-v3")
+# --- Multi-tenancy: this instance serves ONE active client -----------------
+# Booted from backend/clients/<RAG_CLIENT>.json, so the index, namespace,
+# models, retrieval knobs and persona are all data, not code. A different
+# client = a different instance (see client_registry.py).
+ACTIVE_CLIENT = os.environ.get("RAG_CLIENT", "").strip() or registry.active_client_id()
+CFG = registry.get_client(ACTIVE_CLIENT)
 
-RETRIEVE_TOP_K = int(os.environ.get("RETRIEVE_TOP_K", "10"))   # wide net for recall
-RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N", "4"))        # tight set for precision/tokens
-CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD", "0.20"))  # min cosine to trust
-MAX_CONTEXT_CHARS = int(os.environ.get("MAX_CONTEXT_CHARS", "1600"))  # per-source cap => bounded prompt
-HYBRID_ALPHA = float(os.environ.get("HYBRID_ALPHA", "0.5"))   # 1.0=pure dense, 0.0=pure sparse
-RERANK_ALPHA = float(os.environ.get("RERANK_ALPHA", "0.5"))   # lexical rerank blend: 1.0=pure dense, 0.0=pure BM25
-ENABLE_QUERY_REWRITE = os.environ.get("ENABLE_QUERY_REWRITE", "true").lower() == "true"
+INDEX_NAME = CFG["index_name"]
+PINECONE_NAMESPACE = CFG["namespace"]
 
-# The exact escalation line the spec mandates. Used both as a hard guardrail
-# (returned without calling the LLM) and inside the grounding prompt.
-ESCALATION_LINE = (
-    "I need more context or I don't have that information on hand. "
-    "Would you like me to escalate you to a human?"
-)
+# --- Tunables: client config wins, env override wins over that (quick runs) -
+LLM_MODEL = os.environ.get("LLM_MODEL") or CFG["llm_model"]
+EMBED_MODEL = os.environ.get("EMBED_MODEL") or CFG["embed_model"]
+RERANK_MODEL = os.environ.get("RERANK_MODEL") or CFG["rerank_model"]
+
+RETRIEVE_TOP_K = int(os.environ.get("RETRIEVE_TOP_K") or CFG["retrieve_top_k"])
+RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N") or CFG["rerank_top_n"])
+CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD") or CFG["confidence_threshold"])
+MAX_CONTEXT_CHARS = int(os.environ.get("MAX_CONTEXT_CHARS") or CFG["max_context_chars"])
+HYBRID_ALPHA = float(os.environ.get("HYBRID_ALPHA") or CFG["hybrid_alpha"])
+RERANK_ALPHA = float(os.environ.get("RERANK_ALPHA") or CFG["rerank_alpha"])
+_qr_env = os.environ.get("ENABLE_QUERY_REWRITE")
+if _qr_env is not None:
+    ENABLE_QUERY_REWRITE = _qr_env.lower() == "true"
+else:
+    ENABLE_QUERY_REWRITE = bool(CFG["query_rewrite_enabled"])
+
+# The escalation line + persona come from the client config (per-tenant tone).
+ESCALATION_LINE = os.environ.get("ESCALATION_LINE") or CFG["escalation_line"]
+PERSONA_NAME = CFG["persona_name"]
+PERSONA_STYLE = CFG["persona_style"]
 
 GROUNDING_SYSTEM_PROMPT = (
-    "You are the Ejentic Customer Success Agent — professional, precise, and "
-    "premium in tone. You answer ONLY from the numbered context passages "
-    "provided. You must cite the sources you use inline as [Source N]. "
-    "When the context enumerates specific items — a list of technologies, "
-    "product names, figures, or steps — reproduce EVERY item from the context; "
-    "never condense a list down to a subset or drop items for brevity. "
-    "If the retrieved context does not contain the answer, you must gracefully "
+    f"You are the {PERSONA_NAME} — {PERSONA_STYLE}. You answer ONLY from the numbered "
+    "context passages provided. You must cite the sources you use inline as [Source N]. "
+    "When the context enumerates specific items — a list of technologies, product "
+    "names, figures, or steps — reproduce EVERY item from the context; never condense "
+    "a list down to a subset or drop items for brevity. If the retrieved context does "
+    "not contain the answer, you must gracefully "
     f"say exactly: '{ESCALATION_LINE}' Never invent facts, prices, policies, or "
     "sources that are not in the context."
 )
@@ -330,34 +340,67 @@ class QueryRequest(BaseModel):
     query: str
     clearance_level: str = "guest"
     platform: str = "WEB_UI"
+    client: str = ""  # optional; defaults to this instance's active client
 
 
 # ---------------------------------------------------------------------------
-# Multi-tenancy: map the caller's clearance LEVEL onto the stored `clearance`
-# metadata VALUES actually present in the index (public / internal / executive).
-#   guest      -> public
-#   employee   -> public OR internal
-#   executive  -> everything (no filter)
+# Multi-tenancy: resolve the caller's clearance LEVEL onto the stored
+# `clearance` metadata VALUES configured for the active client
+# (public / internal / executive for the default 'ejentic' client).
 # ---------------------------------------------------------------------------
-def build_clearance_filter(clearance_level: str):
-    level = (clearance_level or "guest").strip().lower()
+def _least_privileged_tags(cfg: dict) -> list:
+    """Fail-closed fallback: the tags of the least-privileged role, i.e. the
+    non-wildcard role with the fewest allowed tags."""
+    candidates = [
+        (role, tags) for role, tags in cfg["clearance_levels"].items()
+        if isinstance(tags, list) and tags
+    ]
+    if not candidates:
+        return ["public"]
+    return sorted(candidates, key=lambda pair: len(pair[1]))[0][1]
 
-    if level == "executive":
+
+def build_clearance_filter(clearance_level: str, cfg: dict | None = None):
+    cfg = cfg or CFG
+    level = (clearance_level or "").strip().lower()
+    tags = cfg["clearance_levels"].get(level)
+
+    if tags == "*":
         return None  # unrestricted
 
-    if level == "employee":
-        return MetadataFilters(
-            filters=[
-                MetadataFilter(key="clearance", value="public", operator=FilterOperator.EQ),
-                MetadataFilter(key="clearance", value="internal", operator=FilterOperator.EQ),
-            ],
-            condition=FilterCondition.OR,
-        )
+    if isinstance(tags, list) and tags:
+        filters = [
+            MetadataFilter(key="clearance", value=tag, operator=FilterOperator.EQ)
+            for tag in tags
+        ]
+        if len(filters) == 1:
+            return MetadataFilters(filters=filters)
+        return MetadataFilters(filters=filters, condition=FilterCondition.OR)
 
-    # default / guest — public only. Unknown levels fail CLOSED (safest).
+    # Unknown role -> fail CLOSED to the least privileged tier (safest).
+    tags = _least_privileged_tags(cfg)
     return MetadataFilters(
-        filters=[MetadataFilter(key="clearance", value="public", operator=FilterOperator.EQ)]
+        filters=[MetadataFilter(key="clearance", value=tags[0], operator=FilterOperator.EQ)]
     )
+
+
+def resolve_request_client(request_client: str) -> dict:
+    """Validate the optional `client` field on a request.
+
+    A single instance boots one index/model set for its ACTIVE client, so it can
+    only serve that client. Requesting a different one is a loud 409 (a distinct
+    deployment, not silent cross-tenant fallback). Raises ValueError; endpoints
+    convert it to HTTP 409.
+    """
+    cid = (request_client or "").strip() or ACTIVE_CLIENT
+    if cid != ACTIVE_CLIENT:
+        raise ValueError(
+            f"client '{cid}' is not the active client on this instance "
+            f"(active: '{ACTIVE_CLIENT}'). A different client is a separate "
+            "deployment: start another instance with RAG_CLIENT=<id> "
+            "(see backend/clients/)."
+        )
+    return CFG
 
 
 # ---------------------------------------------------------------------------
@@ -617,11 +660,25 @@ def read_root():
     return {
         "status": "ok",
         "message": "Ejentic AI Enterprise RAG System — Core Intelligence Active.",
+        "client": ACTIVE_CLIENT,
+        "client_name": CFG.get("name", ACTIVE_CLIENT),
         "hybrid_search": HYBRID_ENABLED,
         "reranker": reranker.__class__.__name__ if reranker else None,
         "index": INDEX_NAME,
         "token_metering": True,
         "metrics_endpoint": "/metrics",
+    }
+
+
+@app.get("/clients")
+def clients():
+    """Admin surface: every registered client config (data, not code). Lets
+    operators see which deployments exist and what each serves without digging
+    through backend/clients/. READ ONLY — changing a client is editing JSON."""
+    return {
+        "active_client": ACTIVE_CLIENT,
+        "client_count": len(registry.list_clients()),
+        "clients": registry.list_clients(),
     }
 
 
@@ -631,6 +688,10 @@ async def chat(request: QueryRequest):
     per token and a terminating `data: [DONE]\\n\\n`."""
     if global_index is None:
         raise HTTPException(status_code=500, detail="Agent not initialized.")
+    try:
+        resolve_request_client(request.client)
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
 
     async def event_generator():
         try:
@@ -660,6 +721,7 @@ async def n8n_rag_endpoint(request: QueryRequest):
     if global_index is None:
         raise HTTPException(status_code=500, detail="Agent not initialized.")
     try:
+        resolve_request_client(request.client)
         response_text, meter, gated, saved = await answer_once(
             request.query, request.clearance_level, request.platform
         )
@@ -674,6 +736,8 @@ async def n8n_rag_endpoint(request: QueryRequest):
         return JSONResponse(
             content={"status": "success", "response": response_text}, headers=headers
         )
+    except ValueError as e:
+        raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
@@ -685,6 +749,7 @@ async def metrics():
     gate) plus the most recent per-query rows. Pure DB read — costs no tokens."""
     data = await get_token_metrics(limit=20)
     data["config"] = {
+        "client": ACTIVE_CLIENT,
         "llm_model": LLM_MODEL,
         "confidence_threshold": CONFIDENCE_THRESHOLD,
         "retrieve_top_k": RETRIEVE_TOP_K,

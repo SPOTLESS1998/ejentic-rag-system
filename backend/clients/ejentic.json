@@ -1,0 +1,28 @@
+{
+  "id": "ejentic",
+  "name": "Ejentic AI Knowledge Core",
+  "description": "Default client: Ejentic's own business knowledge base (public marketing copy, internal employee handbook, executive board data). Serves as the canonical template for onboarding a new client.",
+  "index_name": "ejentic-global",
+  "namespace": "ejentic-internal",
+  "embed_model": "nvidia/nv-embedqa-e5-v5",
+  "embed_dim": 1024,
+  "llm_model": "meta/llama-3.1-70b-instruct",
+  "rerank_model": "nvidia/nv-rerankqa-mistral-4b-v3",
+  "retrieve_top_k": 10,
+  "rerank_top_n": 4,
+  "confidence_threshold": 0.2,
+  "max_context_chars": 1600,
+  "hybrid_alpha": 0.5,
+  "rerank_alpha": 0.5,
+  "query_rewrite_enabled": true,
+  "chunk_size": 500,
+  "chunk_overlap": 50,
+  "clearance_levels": {
+    "guest": ["public"],
+    "employee": ["public", "internal"],
+    "executive": "*"
+  },
+  "persona_name": "Ejentic Customer Success Agent",
+  "persona_style": "professional, precise, and premium in tone",
+  "escalation_line": "I need more context or I don't have that information on hand. Would you like me to escalate you to a human?"
+}
