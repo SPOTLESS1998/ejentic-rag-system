@@ -218,7 +218,9 @@ GROUNDING_SYSTEM_PROMPT = (
     "context passages provided. You must cite the sources you use inline as [Source N]. "
     "When the context enumerates specific items — a list of technologies, product "
     "names, figures, or steps — reproduce EVERY item from the context; never condense "
-    "a list down to a subset or drop items for brevity. If the retrieved context does "
+    "a list down to a subset or drop items for brevity. Respond in PLAIN TEXT only: "
+    "never use markdown formatting of any kind — no asterisks, no hashes, no "
+    "backticks. Write lists as simple lines. If the retrieved context does "
     "not contain the answer, you must gracefully "
     f"say exactly: '{ESCALATION_LINE}' Never invent facts, prices, policies, or "
     "sources that are not in the context."
@@ -663,6 +665,33 @@ def _strip_assistant_prefix(text: str) -> str:
     return text
 
 
+_MD_LINK_RE = re.compile(r"\[([^\]]+)\]\(([^)\s]+)\)")
+
+
+def _strip_markdown(text: str) -> str:
+    """Remove markdown decoration so answers never read as AI boilerplate.
+
+    The persona contract is plain text: asterisks (bold/italic), backticks
+    (code), leading heading hashes, and [text](url) links are all flattened.
+    Underscores are deliberately KEPT — they appear in real identifiers."""
+    if not text:
+        return text
+    text = _MD_LINK_RE.sub(r"\1", text)            # [text](url) -> text
+    text = text.replace("**", "").replace("*", "")  # bold/italic markers
+    text = text.replace("`", "")                    # inline code ticks
+    lines = []
+    for line in text.splitlines():
+        lines.append(re.sub(r"^\s{0,3}#{1,6}\s+", "", line))  # heading hashes
+    return "\n".join(lines).replace("\n\n\n+", "\n\n")
+
+
+def _plain_delta(delta: str) -> str:
+    """Per-chunk sanitizer for streaming: drop characters that are NEVER
+    wanted in output (markdown asterisks/backticks) so nothing AI-flavored
+    reaches the UI even mid-stream. Cheap and order-independent."""
+    return delta.replace("*", "").replace("`", "") if delta else delta
+
+
 # ---------------------------------------------------------------------------
 # Answer producers (shared by both endpoints)
 # ---------------------------------------------------------------------------
@@ -687,7 +716,7 @@ async def answer_once(query: str, clearance_level: str, platform: str):
 
         messages = _build_grounded_messages(query, nodes)
         resp = await _retry_achat(messages, meter=meter)
-        text = _strip_assistant_prefix((resp.message.content or "").strip())
+        text = _strip_markdown(_strip_assistant_prefix((resp.message.content or "").strip()))
         meter.record_response(
             resp, fallback_prompt_text=_messages_text(messages), fallback_completion_text=text
         )
@@ -729,7 +758,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
     fallback_handled = False
     try:
         async for chunk in _retry_astream_chat(messages):
-            delta = chunk.delta or ""
+            delta = _plain_delta(chunk.delta or "")
             if not delta:
                 continue
             collected.append(delta)
@@ -767,7 +796,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
         print(f"[stream] streaming failed ({_short(stream_err)}); "
               f"falling back to non-streaming synthesis.")
         resp = await _retry_achat(messages)
-        text = _strip_assistant_prefix((resp.message.content or "").strip())
+        text = _strip_markdown(_strip_assistant_prefix((resp.message.content or "").strip()))
         meter.record_response(
             resp, fallback_prompt_text=_messages_text(messages),
             fallback_completion_text=text,
@@ -924,11 +953,76 @@ async def trigger_ingestion():
         raise HTTPException(status_code=500, detail=str(e))
 
 
+# ---------------------------------------------------------------------------
+# PDF extraction (page-by-page, quality-filtered)
+# ---------------------------------------------------------------------------
+# SimpleDirectoryReader's default extractor map is EMPTY when the optional
+# `llama-index-readers-file` package isn't installed — and with no registered
+# .pdf reader it indexes PDFs as RAW BINARY TEXT (bytes decoded with errors),
+# producing mojibake chunks that look indexed but answer nothing. pypdf
+# extracts the same files cleanly, so we extract page-by-page ourselves,
+# attach page metadata, and skip any page that decodes to garbage.
+try:
+    from pypdf import PdfReader
+except ImportError:
+    PdfReader = None
+
+_PAGE_WORDS = {
+    "the", "and", "for", "with", "that", "this", "from", "was", "were", "are",
+    "have", "has", "had", "not", "but", "all", "can", "will", "one", "two",
+    "contact", "experience", "education", "skills", "project", "leadership",
+    "resume", "work", "team", "data", "manage", "develop", "design", "years",
+}
+
+
+def _page_is_readable(text: str) -> bool:
+    """Heuristic: does a decoded page look like human text, not raw bytes?"""
+    if len(text.strip()) < 30:
+        return False
+    ctrl = sum(1 for c in text if not c.isprintable() and c not in "\n\t\r")
+    if ctrl / len(text) > 0.05:
+        return False
+    tokens = re.findall(r"[a-zA-Z]+", text)
+    if not tokens:
+        return False
+    hits = sum(1 for t in tokens if t.lower() in _PAGE_WORDS)
+    return hits / len(tokens) >= 0.10
+
+
+def _extract_pdf_documents(path, filename):
+    """Extract a PDF page-by-page into LlamaIndex Documents with metadata.
+
+    Returns (documents, skipped_pages). Pages that decode to garbage are
+    skipped — designer PDFs often mix readable and binary-encoded pages.
+    """
+    from llama_index.core.schema import Document
+
+    docs, skipped = [], 0
+    reader = PdfReader(str(path))
+    for i, page in enumerate(reader.pages):
+        try:
+            text = page.extract_text() or ""
+        except Exception:
+            skipped += 1
+            continue
+        if _page_is_readable(text):
+            docs.append(
+                Document(
+                    text=text,
+                    metadata={"file_name": filename, "page": i + 1},
+                )
+            )
+        else:
+            skipped += 1
+    return docs, skipped
+
+
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...)):
     """Ingest a one-off PDF into an in-memory index. Subsequent queries fold its
     chunks into the same retrieve->rerank pipeline (no clearance filter, since
-    it's the caller's own document)."""
+    it's the caller's own document). The index survives restarts via the
+    startup auto-re-index of data/uploads (see below)."""
     global pdf_index
 
     upload_dir = "data/uploads"
@@ -939,11 +1033,82 @@ async def upload_pdf(file: UploadFile = File(...)):
 
     try:
         print(f"Parsing uploaded PDF: {file.filename}")
-        documents = SimpleDirectoryReader(input_files=[file_path]).load_data()
-        pdf_index = VectorStoreIndex.from_documents(documents)  # in-memory
-        return {"status": "success", "message": f"Successfully ingested {file.filename}."}
+        if file.filename.lower().endswith(".pdf") and PdfReader is not None:
+            documents, skipped = _extract_pdf_documents(file_path, file.filename)
+            if skipped:
+                print(f"[upload] skipped {skipped} unreadable page(s)")
+        else:
+            documents = SimpleDirectoryReader(input_files=[file_path]).load_data()
+            skipped = 0
+    except HTTPException:
+        raise
     except Exception as e:
-        raise HTTPException(status_code=500, detail=str(e))
+        raise HTTPException(
+            status_code=500,
+            detail=f"Failed to parse PDF: {_short(e)}",
+        )
+
+    extracted = sum(len((d.text or "").strip()) for d in documents)
+    if extracted < 50:
+        # Previously this failed SILENTLY: the 200 response masked a no-op
+        # index, so the user believed their doc was queryable when it wasn't.
+        pdf_index = None
+        raise HTTPException(
+            status_code=400,
+            detail=(
+                f"Could not extract readable text from {file.filename} "
+                f"({extracted} chars, {skipped} unreadable pages). It may be "
+                "scanned/image-only or password-protected — the knowledge "
+                "base cannot index it."
+            ),
+        )
+
+    pdf_index = VectorStoreIndex.from_documents(documents)  # in-memory
+    print(f"[upload] {file.filename}: {len(documents)} pages, {extracted} chars indexed")
+    return {
+        "status": "success",
+        "message": (
+            f"Ingested {file.filename} ({len(documents)} pages, "
+            f"{extracted} chars). It is now queryable."
+        ),
+    }
+
+
+_startup_reindex_done = False
+
+
+def _startup_reindex_latest_upload() -> None:
+    """Re-index the most recent PDF from a previous session. pdf_index lives
+    only in memory, so WITHOUT this a restart silently forgets the user's
+    uploaded doc while data/uploads still holds the file."""
+    global pdf_index, _startup_reindex_done
+    if _startup_reindex_done or pdf_index is not None:
+        return
+    _startup_reindex_done = True
+    upload_dir = "data/uploads"
+    try:
+        if not os.path.isdir(upload_dir):
+            return
+        pdfs = [f for f in os.listdir(upload_dir) if f.lower().endswith(".pdf")]
+        if not pdfs:
+            return
+        latest = max(pdfs, key=lambda f: os.path.getmtime(os.path.join(upload_dir, f)))
+        path = os.path.join(upload_dir, latest)
+        if PdfReader is not None:
+            docs, _skipped = _extract_pdf_documents(path, latest)
+        else:
+            docs = SimpleDirectoryReader(input_files=[path]).load_data()
+        extracted = sum(len((d.text or "").strip()) for d in docs)
+        if extracted < 50:
+            print(f"[upload] startup re-index skipped (unreadable): {latest}")
+            return
+        pdf_index = VectorStoreIndex.from_documents(docs)
+        print(f"[upload] re-indexed previous upload: {latest} ({extracted} chars)")
+    except Exception as e:
+        print(f"[upload] startup re-index failed: {_short(e)}")
+
+
+_startup_reindex_latest_upload()
 
 
 if __name__ == "__main__":

@@ -33,3 +33,4 @@ pypdf
 # (torch 2.5+) and Intel-mac dev. On Intel mac also pin `numpy<2` (torch 2.2.2 was
 # built against NumPy 1.x); Linux with torch 2.5+ is fine with NumPy 2.
 sentence-transformers>=3.0,<4
+pypdf>=4.0
