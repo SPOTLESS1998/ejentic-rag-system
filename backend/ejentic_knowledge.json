@@ -1,6 +1,6 @@
 [
     {
-        "text": "Ejentic AI is a premier Enterprise AI agency dedicated to building advanced, scalable, and secure agentic workflows for modern businesses. We specialize in Retrieval-Augmented Generation (RAG), Autonomous AI Agents, and Custom Large Language Model (LLM) fine-tuning.",
+        "text": "Ejentic AI is a premier Enterprise AI agency dedicated to building advanced, scalable, and secure agentic workflows for modern businesses. We specialize in Retrieval-Augmented Generation (RAG), Autonomous AI Agents, and AI-driven lead generation pipelines.",
         "clearance": "public"
     },
     {
@@ -12,11 +12,15 @@
         "clearance": "public"
     },
     {
-        "text": "Core Offer 3: The Ejentic AI Academy. A comprehensive training program designed to upskill corporate teams. We offer intensive 4-week bootcamps covering Prompt Engineering, RAG Architectures, and the fundamentals of LangChain and LlamaIndex.",
+        "text": "Core Offer 3: The Ejentic Lead Generation System. An AI-powered pipeline that sources, qualifies, and enriches business prospects automatically, then feeds them into outreach workflows. It combines agentic research with CRM and email tool integration to keep the sales funnel full without manual prospecting.",
         "clearance": "public"
     },
     {
-        "text": "Ejentic AI Technical Expertise: Our tech stack relies heavily on Python, FastAPI, Next.js for frontends, Pinecone for vector DBs, and LlamaIndex for orchestration. We primarily leverage NVIDIA NIM microservices and Llama-3.1 models for maximum reasoning efficiency.",
+        "text": "Core Offer 4: AI Consulting & Team Enablement. Ejentic AI offers advisory engagements that help companies adopt agentic AI with confidence. We assess your workflows, identify high-impact automation opportunities, and enable your team to build and operate AI agents safely.",
+        "clearance": "public"
+    },
+    {
+        "text": "Ejentic AI Technical Expertise: Our tech stack relies heavily on Python, FastAPI, Next.js for frontends, Pinecone for vector DBs, and LlamaIndex for orchestration. We primarily leverage NVIDIA NIM microservices and Mistral Nemotron models for maximum reasoning efficiency.",
         "clearance": "public"
     },
     {
@@ -36,3 +40,4 @@
         "clearance": "executive"
     }
 ]
+
