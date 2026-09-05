@@ -10,8 +10,8 @@ Implements the 3-Step Production Standard as a linear, controllable pipeline
 
   Step 2 — Advanced Retrieval (this file):
            query rewriting  ->  hybrid search (dense+sparse, auto-degrades to
-           dense on a cosine index)  ->  reranking (cross-encoder when a rerank
-           model is reachable, else a dependency-free BM25 lexical reranker)  ->
+           dense on a cosine index)  ->  reranking (a LOCAL cross-encoder by
+           default, with a dependency-free BM25 lexical reranker as the floor)  ->
            extreme grounding prompt with mandatory citations.
 
   Step 3 — Guardrails & Observability (this file):
@@ -189,7 +189,7 @@ PINECONE_NAMESPACE = CFG["namespace"]
 LLM_MODEL = os.environ.get("LLM_MODEL") or CFG["llm_model"]
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT") or os.environ.get("LLM_REQUEST_TIMEOUT") or "300")
 EMBED_MODEL = os.environ.get("EMBED_MODEL") or CFG["embed_model"]
-RERANK_MODEL = os.environ.get("RERANK_MODEL") or CFG["rerank_model"]
+RERANK_MODEL = os.environ.get("RERANK_MODEL") or CFG["rerank_model"]  # only used when RERANK_TRY_NVIDIA=true (e.g. self-hosted NIM)
 
 RETRIEVE_TOP_K = int(os.environ.get("RETRIEVE_TOP_K") or CFG["retrieve_top_k"])
 RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N") or CFG["rerank_top_n"])
@@ -197,6 +197,11 @@ CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD") or CFG["conf
 MAX_CONTEXT_CHARS = int(os.environ.get("MAX_CONTEXT_CHARS") or CFG["max_context_chars"])
 HYBRID_ALPHA = float(os.environ.get("HYBRID_ALPHA") or CFG["hybrid_alpha"])
 RERANK_ALPHA = float(os.environ.get("RERANK_ALPHA") or CFG["rerank_alpha"])
+# NVIDIA's PUBLIC hosted reranking API reached end-of-life on 2026-05-18 (HTTP 410
+# Gone) — no model name revives it. So the dead tier is NOT tried by default;
+# reranking runs on a LOCAL cross-encoder instead. Set RERANK_TRY_NVIDIA=true only
+# when you have a reachable (e.g. self-hosted) NIM rerank endpoint at RERANK_MODEL.
+RERANK_TRY_NVIDIA = os.environ.get("RERANK_TRY_NVIDIA", "false").lower() == "true"
 _qr_env = os.environ.get("ENABLE_QUERY_REWRITE")
 if _qr_env is not None:
     ENABLE_QUERY_REWRITE = _qr_env.lower() == "true"
@@ -333,24 +338,30 @@ def _build_reranker():
     tier must pass a real probe call before we trust it, so we never advertise a
     stage that silently no-ops at query time.
 
-    Priority: NVIDIA NIM cross-encoder (probed) -> local sentence-transformers
-    cross-encoder (probed, only if the package is installed) -> dependency-free
+    Priority: local sentence-transformers cross-encoder (probed) -> dependency-free
     BM25 lexical reranker (always available, $0/query). The lexical tier is the
-    guaranteed floor, so retrieval is always reranked by *something* real."""
-    # 1) NVIDIA NIM reranker — verify with a REAL call. Hosted rerank endpoints
-    #    can be retired (we've observed 404/410), and construction alone won't
-    #    reveal that, so probe before trusting it.
-    try:
-        from llama_index.postprocessor.nvidia_rerank import NVIDIARerank
-        rr = NVIDIARerank(model=RERANK_MODEL, api_key=NVIDIA_API_KEY, top_n=RERANK_TOP_N)
-        _probe_reranker(rr)
-        print(f"[rerank] NVIDIA cross-encoder active (probed OK): {RERANK_MODEL}")
-        return rr
-    except Exception as e:
-        print(f"[rerank] NVIDIA reranker unavailable ({_short(e)}); trying local cross-encoder.")
+    guaranteed floor, so retrieval is always reranked by *something* real.
 
-    # 2) Local sentence-transformers cross-encoder — only if the package is
-    #    installed. Probe it too, in case the model can't load.
+    NVIDIA's PUBLIC hosted reranking endpoint reached end-of-life on 2026-05-18
+    (HTTP 410 Gone), so it is NOT tried by default — it would only fail a probe on
+    every boot. Set RERANK_TRY_NVIDIA=true (e.g. for a self-hosted NIM) to put it
+    back at the front of the chain."""
+    # 0) OPTIONAL NVIDIA NIM cross-encoder — OFF by default (public SaaS EOL'd
+    #    2026-05-18 -> 410 Gone). Attempted only when RERANK_TRY_NVIDIA=true, e.g.
+    #    when RERANK_MODEL points at a reachable self-hosted NIM. Probed either
+    #    way, because construction alone won't reveal a dead endpoint.
+    if RERANK_TRY_NVIDIA:
+        try:
+            from llama_index.postprocessor.nvidia_rerank import NVIDIARerank
+            rr = NVIDIARerank(model=RERANK_MODEL, api_key=NVIDIA_API_KEY, top_n=RERANK_TOP_N)
+            _probe_reranker(rr)
+            print(f"[rerank] NVIDIA cross-encoder active (probed OK): {RERANK_MODEL}")
+            return rr
+        except Exception as e:
+            print(f"[rerank] NVIDIA reranker unavailable ({_short(e)}); trying local cross-encoder.")
+
+    # 1) Local sentence-transformers cross-encoder — the DEFAULT real reranker:
+    #    $0/query, offline, never retired. Probe it too, in case the model can't load.
     try:
         from llama_index.core.postprocessor import SentenceTransformerRerank
         rr = SentenceTransformerRerank(
@@ -363,7 +374,7 @@ def _build_reranker():
         print(f"[rerank] Local cross-encoder unavailable ({_short(e)}); "
               f"using dependency-free BM25 lexical reranker.")
 
-    # 3) Dependency-free lexical (BM25) reranker — no deps, no tokens, no API
+    # 2) Dependency-free lexical (BM25) reranker — no deps, no tokens, no API
     #    calls; always available, so retrieval is never left unranked.
     print(f"[rerank] BM25 lexical reranker active (no deps, no tokens; alpha={RERANK_ALPHA}).")
     return LexicalReranker(top_n=RERANK_TOP_N, alpha=RERANK_ALPHA)
