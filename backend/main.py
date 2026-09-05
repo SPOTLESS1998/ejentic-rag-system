@@ -726,6 +726,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
     collected = []
     prefix_checked = False
     buffer = ""
+    fallback_handled = False
     try:
         async for chunk in _retry_astream_chat(messages):
             delta = chunk.delta or ""
@@ -756,17 +757,46 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
             cleaned = _strip_assistant_prefix(buffer)
             if cleaned:
                 yield cleaned
+    except Exception as stream_err:
+        # NVIDIA's engine can crash mid-stream (observed live: vLLM "EngineCore
+        # encountered an issue"). The SSE response is already committed, so the
+        # stream cannot be replayed — recover by synthesizing NON-streaming with
+        # the SAME grounded context and delivering the complete answer as one
+        # chunk. The UI always gets a usable reply; the frozen SSE contract is
+        # untouched.
+        print(f"[stream] streaming failed ({_short(stream_err)}); "
+              f"falling back to non-streaming synthesis.")
+        resp = await _retry_achat(messages)
+        text = _strip_assistant_prefix((resp.message.content or "").strip())
+        meter.record_response(
+            resp, fallback_prompt_text=_messages_text(messages),
+            fallback_completion_text=text,
+        )
+        delivered = _strip_assistant_prefix("".join(collected)).strip()
+        if delivered:
+            yield "\n\n[stream interrupted — answer recovered] " + text
+        else:
+            yield text
+        asyncio.create_task(log_query(
+            f"{platform}_{clearance_level}", query,
+            (delivered + "\n\n" + text).strip() if delivered else text,
+            prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
+            total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
+        ))
+        fallback_handled = True
+        return
     finally:
-        full = _strip_assistant_prefix("".join(collected)).strip()
-        if full:
-            # Streaming rarely reports provider usage, so estimate: prompt from the
-            # grounded messages we sent, completion from the accumulated answer.
-            meter.record_estimate(_messages_text(messages), full)
-            asyncio.create_task(log_query(
-                f"{platform}_{clearance_level}", query, full,
-                prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
-                total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
-            ))
+        if not fallback_handled:
+            full = _strip_assistant_prefix("".join(collected)).strip()
+            if full:
+                # Streaming rarely reports provider usage, so estimate: prompt from the
+                # grounded messages we sent, completion from the accumulated answer.
+                meter.record_estimate(_messages_text(messages), full)
+                asyncio.create_task(log_query(
+                    f"{platform}_{clearance_level}", query, full,
+                    prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
+                    total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
+                ))
 
 
 # ---------------------------------------------------------------------------
