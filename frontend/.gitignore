@@ -30,8 +30,10 @@ yarn-debug.log*
 yarn-error.log*
 .pnpm-debug.log*
 
-# env files (can opt-in for committing if needed)
+# env files: never commit real ones, DO commit the documented template.
+# .env.example holds only variable NAMES and the warning about NEXT_PUBLIC_.
 .env*
+!.env.example
 
 # vercel
 .vercel
