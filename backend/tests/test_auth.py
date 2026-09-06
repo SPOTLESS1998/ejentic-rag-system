@@ -405,4 +405,54 @@ with env(**KEYS):
         undo()
         m.CFG["auth"] = saved_auth
 
+# ---------------------------------------------------------------------------
+section("keys in .env are visible to validation, whatever the import order")
+# ---------------------------------------------------------------------------
+# REGRESSION. The offline suite injects keys straight into os.environ, so it
+# never exercised how a real boot gets them: from backend/.env via dotenv.
+# database.py resolves its per-tenant DB path at MODULE level, which touches the
+# registry -- and the registry validates auth. Because main.py called
+# load_dotenv() ~100 lines AFTER importing database, validation ran against an
+# environment that had not been populated yet, and a server whose .env held three
+# perfectly good keys refused to boot. Every unit test passed the whole time.
+#
+# The fix put load_dotenv() in client_registry itself (the module that reads
+# these vars), so no caller can get the order wrong. This pins that: a subprocess
+# that imports the registry with the key vars scrubbed from its environment must
+# still see them, because the registry loaded .env on its own.
+import subprocess  # noqa: E402
+
+BACKEND = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+dotenv_path = os.path.join(BACKEND, ".env")
+
+if not os.path.exists(dotenv_path):
+    check("SKIPPED: no backend/.env on this machine (nothing to load)", True)
+else:
+    probe = (
+        "import os, sys; sys.path.insert(0, %r);"
+        "import client_registry;"
+        "print(','.join(k for k in ('RAG_KEY_GUEST','RAG_KEY_EMPLOYEE','RAG_KEY_EXECUTIVE')"
+        " if os.environ.get(k)))" % BACKEND
+    )
+    scrubbed = {k: v for k, v in os.environ.items() if not k.startswith("RAG_KEY_")}
+    # Prove the vars really are absent, so a pass cannot come from inheritance.
+    check("the probe environment has no RAG_KEY_* vars to inherit",
+          not any(k.startswith("RAG_KEY_") for k in scrubbed))
+
+    named = set()
+    for line in open(dotenv_path, encoding="utf-8", errors="replace"):
+        s = line.strip()
+        if s.startswith("RAG_KEY_") and "=" in s and s.split("=", 1)[1].strip():
+            named.add(s.split("=", 1)[0].strip())
+
+    out = subprocess.run([sys.executable, "-c", probe], capture_output=True,
+                         text=True, env=scrubbed, cwd="/")
+    loaded = set(filter(None, out.stdout.strip().split(",")))
+    check("importing client_registry alone loads backend/.env",
+          loaded == named and bool(named),
+          f"expected {sorted(named)}, got {sorted(loaded)}; stderr={out.stderr[:200]}")
+    # cwd="/" above matters: the load must be anchored to the backend directory,
+    # not to wherever the process happens to have been started from.
+    check("the .env load does not depend on the process's cwd", loaded == named)
+
 finish("test_auth")
