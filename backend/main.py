@@ -77,7 +77,7 @@ from llama_index.llms.nvidia import NVIDIA
 from llama_index.embeddings.nvidia import NVIDIAEmbedding
 from pinecone import Pinecone
 
-from database import init_db, log_query, get_token_metrics
+from database import init_db, log_query, get_token_metrics, DB_PATH
 from token_meter import TokenMeter, estimate_tokens
 import client_registry as registry
 import auth as authmod
@@ -1453,7 +1453,11 @@ async def upload_pdf(file: UploadFile = File(...),
     except Exception as e:
         if os.path.exists(file_path):
             os.remove(file_path)
-        raise HTTPException(status_code=500, detail=f"Failed to parse upload: {_short(e)}")
+        raise HTTPException(
+            status_code=400,
+            detail=f"Could not read this file -- it may be corrupt, or not really a "
+                   f"{os.path.splitext(file_path)[1] or 'supported'} file: {_short(e)}",
+        )
 
     extracted = sum(len((d.text or "").strip()) for d in documents)
     if extracted < 50:

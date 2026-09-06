@@ -26,7 +26,7 @@
   "persona_style": "professional, precise, and premium in tone",
   "escalation_line": "I need more context or I don't have that information on hand. Would you like me to escalate you to a human?",
   "auth": {
-    "required": false,
+    "required": true,
     "keys": {
       "guest": "RAG_KEY_GUEST",
       "employee": "RAG_KEY_EMPLOYEE",

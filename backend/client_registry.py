@@ -38,6 +38,16 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from dotenv import load_dotenv
+
+# Load backend/.env HERE, not in the caller. Validation below reads the auth key
+# env vars, and any module that touches the registry at import time (database.py
+# derives its per-tenant DB path that way) would otherwise validate against an
+# environment that has not been populated yet -- an instance with perfectly good
+# keys in .env would refuse to boot purely because of import order. Anchored to
+# this file's directory so the result does not depend on the process's cwd.
+load_dotenv(Path(__file__).resolve().parent / ".env")
+
 CLIENTS_DIR = Path(__file__).resolve().parent / "clients"
 
 # The full schema + production-safe defaults. A client JSON only overrides the
