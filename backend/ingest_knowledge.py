@@ -60,9 +60,14 @@ EMBED_MODEL = os.environ.get("EMBED_MODEL") or CFG["embed_model"]
 EMBED_DIM = CFG["embed_dim"]  # must match the index metric/space
 CHUNK_SIZE = int(os.environ.get("CHUNK_SIZE") or CFG["chunk_size"])
 
-# The only clearance levels the retrieval layer understands. Any other value is
-# a typo that would silently make a document unreachable — so we reject it.
-VALID_CLEARANCE = {"public", "internal", "executive"}
+# The clearance tags THIS TENANT's roles can actually filter on, read from their
+# own config (client_registry.tenant_clearance_tags). Any other value is a typo
+# that would silently make a document unreachable — so we reject it.
+#
+# This used to be a hardcoded {"public","internal","executive"}: a tenant whose
+# tiers are e.g. partner/legal could not ingest without editing Python, which is
+# exactly the kind of per-client business fact MULTITENANCY.md keeps out of code.
+VALID_CLEARANCE = set(registry.tenant_clearance_tags(CFG))
 
 
 def _fatal(msg: str) -> None:
@@ -85,8 +90,15 @@ def load_and_validate(path: str) -> list[Document]:
     if not isinstance(data, list) or not data:
         _fatal(f"{path} must be a non-empty JSON array of objects")
 
+    if not VALID_CLEARANCE:
+        _fatal(
+            f"client '{RAG_CLIENT}' declares no clearance tags, so nothing could be "
+            f"tagged or retrieved. Give at least one role an explicit tag list in "
+            f"clients/{RAG_CLIENT}.json (a role of '*' sees every tag but defines none)."
+        )
+
     documents: list[Document] = []
-    counts = {lvl: 0 for lvl in VALID_CLEARANCE}
+    counts = {lvl: 0 for lvl in sorted(VALID_CLEARANCE)}
     for i, item in enumerate(data):
         if not isinstance(item, dict):
             _fatal(f"record #{i} is not an object")
@@ -123,7 +135,12 @@ def load_and_validate(path: str) -> list[Document]:
 
 
 def ensure_index(pc: Pinecone):
-    """Create the index if it doesn't exist (cosine, dim 1024), else reuse it."""
+    """Create the index if it doesn't exist, else reuse it.
+
+    Dimension comes from the client's `embed_dim` (2048 for the default
+    nemotron-3-embed-1b), never a literal — an index created at the wrong
+    dimension rejects every upsert, and the error surfaces far from the cause.
+    """
     if INDEX_NAME not in pc.list_indexes().names():
         print(f"Creating Pinecone index '{INDEX_NAME}' (dim={EMBED_DIM}, cosine)...")
         pc.create_index(
