@@ -207,4 +207,59 @@ for fn in (m.answer_once, m.answer_stream):
     check(f"{fn.__name__} passes an upload_token through",
           "upload_token" in inspect.signature(fn).parameters)
 
+# ---------------------------------------------------------------------------
+section("surviving a restart is per-token, not per-instance")
+# ---------------------------------------------------------------------------
+# An in-memory index dies with the process, so a restart used to lose the user's
+# document. The upstream fix re-indexed "the most recent file in data/uploads"
+# into the process-wide index at startup — which restores the document for
+# WHOEVER QUERIES NEXT, not for the person who uploaded it. That is the shared-
+# state leak again, wearing a different hat. So rehydration is keyed on the token
+# the caller presents: the file comes back only for someone who still holds it.
+_real_load = m._load_upload_documents
+_real_vsi = m.VectorStoreIndex
+
+
+class _FakeDoc:
+    def __init__(self, text):
+        self.text = text
+
+
+class _FakeVSI:
+    @staticmethod
+    def from_documents(docs):
+        return FakeIndex(docs[0].text)
+
+
+m._load_upload_documents = lambda path, filename: ([_FakeDoc(open(path).read())], 0)
+m.VectorStoreIndex = _FakeVSI
+try:
+    restart_dir = tempfile.mkdtemp(prefix="rag_restart_")
+    a_path = os.path.join(restart_dir, "a.txt")
+    with open(a_path, "w") as fh:
+        fh.write("caller-A's private contract")
+
+    m._UPLOAD_SIDECAR = os.path.join(restart_dir, "_tokens.json")
+    tok = m._remember_upload(FakeIndex("in memory"), "a.txt", a_path)
+
+    m._uploads.clear()          # <- the restart: memory is gone, the file is not
+    check("the sidecar survives the restart", os.path.exists(m._UPLOAD_SIDECAR))
+    rehydrated = m._upload_index(tok)
+    check("the uploader's own token brings their document back",
+          rehydrated is not None and rehydrated.label == "caller-A's private contract")
+
+    m._uploads.clear()
+    check("a DIFFERENT caller's token gets nothing after the restart",
+          m._upload_index("some-other-token") is None,
+          "re-indexing the latest upload for everyone is the bug this replaces")
+    check("no token gets nothing after the restart", m._upload_index("") is None)
+
+    m._uploads.clear()
+    os.remove(a_path)
+    check("a token whose file is gone fails closed (no stale index)",
+          m._upload_index(tok) is None)
+finally:
+    m._load_upload_documents = _real_load
+    m.VectorStoreIndex = _real_vsi
+
 finish("test_upload_safety")
