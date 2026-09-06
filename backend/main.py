@@ -4,9 +4,11 @@ Ejentic AI Enterprise RAG System — FastAPI "Brain".
 Implements the 3-Step Production Standard as a linear, controllable pipeline
 (not a black-box agent) so every stage is observable and token-bounded:
 
-  Step 1 — Ingestion (see ingest_mock_data.py / scrape_and_ingest.py):
-           semantic chunking + nvidia/nv-embedqa-e5-v5 + Pinecone upsert with a
-           `clearance` metadata tag on every chunk (multi-tenancy).
+  Step 1 — Ingestion (ingest_knowledge.py — the ONE canonical path):
+           semantic chunking + the client's configured embed model + Pinecone
+           upsert with a `clearance` metadata tag on every chunk. It is
+           deliberately the only script that writes vectors, so there is exactly
+           one place the security-critical tag is attached and validated.
 
   Step 2 — Advanced Retrieval (this file):
            query rewriting  ->  hybrid search (dense+sparse, auto-degrades to
@@ -35,9 +37,16 @@ TOKEN-MANAGEMENT decisions baked in (the mission's #1 priority):
 API CONTRACTS ARE FROZEN (a separate AI owns the Next.js UI and n8n owns
 Telegram): `/chat` streams SSE `data: {"chunk": "..."}\n\n`; `/api/rag` returns
 `{"status": "success", "response": "..."}`. Do not change these shapes.
+
+SECURITY — the clearance filter is only as meaningful as the authentication in
+front of it. The caller's role comes from an API KEY (auth.py), never from the
+request body; a request may NARROW its own clearance but never widen it; and
+/ingest, which can delete every vector in the namespace, is admin-only. Before
+that existed, `"clearance_level": "executive"` in a plain curl read board-only
+material with no credential at all.
 """
 
-from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi import FastAPI, HTTPException, UploadFile, File, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
@@ -45,9 +54,11 @@ import asyncio
 import json
 import math
 import re
-import shutil
+import secrets
 import os
 import sys
+from collections import OrderedDict
+from contextlib import asynccontextmanager
 from dotenv import load_dotenv
 
 from llama_index.core import VectorStoreIndex, Settings, SimpleDirectoryReader
@@ -69,6 +80,7 @@ from pinecone import Pinecone
 from database import init_db, log_query, get_token_metrics
 from token_meter import TokenMeter, estimate_tokens
 import client_registry as registry
+import auth as authmod
 
 # ---------------------------------------------------------------------------
 # PATCH: llama-index's NVIDIA client validates the model against a LIVE
@@ -119,8 +131,7 @@ def _is_transient(exc: Exception) -> bool:
     return any(s in msg for s in _TRANSIENT_SUBSTRINGS)
 
 
-async def _retry_achat(messages, *, attempts: int = 3, meter=None,
-                       fallback_prompt_text: str = ""):
+async def _retry_achat(messages, *, attempts: int = 3):
     last_err = None
     for attempt in range(1, attempts + 1):
         try:
@@ -138,23 +149,36 @@ async def _retry_achat(messages, *, attempts: int = 3, meter=None,
 
 
 async def _retry_astream_chat(messages, *, attempts: int = 3):
-    last_err = None
+    """Stream chat deltas, retrying ONLY while nothing has been emitted yet.
+
+    THE BUG THIS FIXES: the old version retried on any transient failure, but it
+    had already yielded deltas downstream — restarting the generator re-sent text
+    the client had, so a mid-stream blip produced a visibly duplicated answer
+    ("Hello worldHello world!"). A stream is not replayable once a single token is
+    out the door.
+
+    So: retry freely before the first delta (the connection simply hadn't started),
+    and once ANY delta has been yielded, re-raise instead. The caller
+    (answer_stream) already recovers a truncated stream by synthesizing
+    non-streaming from the SAME grounded context — that path is the right one, and
+    sim_crash_test.py proves it works.
+    """
     for attempt in range(1, attempts + 1):
+        emitted = False
         try:
             # astream_chat returns a coroutine -> await to get the async iterable
             stream = await Settings.llm.astream_chat(messages)
             async for chunk in stream:
+                emitted = True
                 yield chunk
             return
         except Exception as e:
-            last_err = e
-            if attempt < attempts and _is_transient(e):
-                wait = 2 * attempt
-                print(f"[llm] astream attempt {attempt} transient ({_short(e)}); retrying in {wait}s...")
-                await asyncio.sleep(wait)
-            else:
+            if emitted or attempt >= attempts or not _is_transient(e):
                 raise
-    raise last_err
+            wait = 2 * attempt
+            print(f"[llm] astream attempt {attempt} transient ({_short(e)}); "
+                  f"nothing emitted yet, retrying in {wait}s...")
+            await asyncio.sleep(wait)
 
 # ---------------------------------------------------------------------------
 # Environment & observability
@@ -235,7 +259,95 @@ vector_store = None
 global_index = None
 reranker = None
 HYBRID_ENABLED = False
-pdf_index = None  # in-memory index for a user-uploaded PDF (see /upload)
+
+# Uploaded PDFs, keyed by the opaque token /upload returns. This used to be a
+# single process-wide `pdf_index` folded into EVERY caller's query — so one
+# person's uploaded document became retrievable context for everyone hitting the
+# instance, with no clearance filter. Now a query only sees a PDF whose token it
+# presents. Bounded so an upload flood cannot exhaust memory.
+MAX_UPLOADS = int(os.environ.get("MAX_UPLOADS", "8"))
+_uploads: "OrderedDict[str, dict]" = OrderedDict()
+
+# Sidecar so an upload survives a restart. The in-memory index does not, and
+# without this a restart silently forgets the user's document while the file is
+# still sitting in data/uploads. It maps token -> stored file, and is read ONLY
+# when a caller presents that token, so rehydration stays per-caller: the old
+# behaviour re-indexed "the latest upload" into a process-wide index, which
+# handed one person's document to whoever queried next.
+# (The tokens live next to the files they unlock, so this grants no access that
+# read permission on data/uploads doesn't already give.)
+_UPLOAD_SIDECAR = os.path.join(
+    os.path.dirname(os.path.abspath(__file__)), "data", "uploads", "_tokens.json")
+
+
+def _sidecar_read() -> dict:
+    try:
+        with open(_UPLOAD_SIDECAR) as fh:
+            return json.load(fh)
+    except Exception:
+        return {}
+
+
+def _sidecar_write(entries: dict) -> None:
+    try:
+        os.makedirs(os.path.dirname(_UPLOAD_SIDECAR), exist_ok=True)
+        with open(_UPLOAD_SIDECAR, "w") as fh:
+            json.dump(entries, fh)
+    except Exception as e:
+        print(f"[upload] could not persist upload token map: {_short(e)}")
+
+
+def _remember_upload(index, filename: str, path: str = "") -> str:
+    """Store an uploaded PDF's index under a fresh unguessable token (LRU-capped)."""
+    token = secrets.token_urlsafe(24)
+    _uploads[token] = {"index": index, "filename": filename, "path": path}
+    _uploads.move_to_end(token)
+    while len(_uploads) > MAX_UPLOADS:
+        _uploads.popitem(last=False)   # evict the least-recently-used
+    if path:
+        entries = _sidecar_read()
+        entries[token] = {"path": path, "filename": filename}
+        # Keep the sidecar bounded the same way the memory cache is.
+        for stale in list(entries)[:-max(MAX_UPLOADS, 1)]:
+            entries.pop(stale, None)
+        _sidecar_write(entries)
+    return token
+
+
+def _upload_index(token: str):
+    """The index for this token, or None. Unknown/expired tokens are simply
+    ignored rather than erroring — the query still runs against the KB.
+
+    On a miss we try the sidecar once: the process may have restarted since the
+    upload, and re-reading the file the token points at is what lets the caller
+    keep querying their document across a restart.
+    """
+    key = (token or "").strip()
+    if not key:
+        return None
+    entry = _uploads.get(key)
+    if entry:
+        _uploads.move_to_end(key)
+        return entry["index"]
+
+    saved = _sidecar_read().get(key)
+    if not saved or not os.path.exists(saved.get("path", "")):
+        return None
+    try:
+        docs, _skipped = _load_upload_documents(saved["path"], saved.get("filename", ""))
+        if not docs:
+            return None
+        index = VectorStoreIndex.from_documents(docs)
+    except Exception as e:
+        print(f"[upload] re-index after restart failed: {_short(e)}")
+        return None
+    _uploads[key] = {"index": index, "filename": saved.get("filename", ""),
+                     "path": saved["path"]}
+    _uploads.move_to_end(key)
+    while len(_uploads) > MAX_UPLOADS:
+        _uploads.popitem(last=False)
+    print(f"[upload] re-indexed after restart: {saved.get('filename', '')}")
+    return index
 
 
 def _short(e, n: int = 110) -> str:
@@ -382,7 +494,19 @@ def _build_reranker():
     return LexicalReranker(top_n=RERANK_TOP_N, alpha=RERANK_ALPHA)
 
 
-if not PINECONE_API_KEY or not NVIDIA_API_KEY:
+# RAG_OFFLINE=1 skips ALL model and vector-store construction at import.
+#
+# Importing this module normally builds an NVIDIA embedding client, an LLM client
+# and a Pinecone connection — real network calls, before a single request. The
+# offline test suite needs the pure logic in here (auth, clearance filters, the
+# stream helpers) without any of that, and a suite that quietly talks to Pinecone
+# on someone's laptop is not an offline suite. The endpoints degrade exactly as
+# they already do when Pinecone is unreachable: global_index stays None.
+RAG_OFFLINE = (os.environ.get("RAG_OFFLINE") or "").strip().lower() in ("1", "true", "yes")
+
+if RAG_OFFLINE:
+    print("[offline] RAG_OFFLINE=1 — skipping model + Pinecone init (tests only).")
+elif not PINECONE_API_KEY or not NVIDIA_API_KEY:
     print("Error: API keys are not properly configured (PINECONE_API_KEY / NVIDIA_API_KEY).")
 else:
     # Step 1 models — embeddings + LLM on the NVIDIA stack.
@@ -439,28 +563,82 @@ else:
         print(f"Error initializing Pinecone: {e}")
 
 
-app = FastAPI(title="Ejentic AI Enterprise RAG System")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown. Replaces the deprecated @app.on_event("startup")."""
+    await init_db()
+    print(f"Audit Database Initialized ({DB_PATH}).")
+    if not authmod.is_enabled(CFG):
+        print("⚠️  AUTH IS OFF — clearance is taken from the request body, so any "
+              "caller can ask for any role. Fine locally; NEVER expose this "
+              "instance. Set auth.required=true in the client config.")
+    else:
+        st = authmod.status(CFG)
+        print(f"🔐 auth ON — roles with keys: {', '.join(st['roles_with_keys_set']) or 'NONE'}"
+              + (f" | missing: {', '.join(st['roles_missing_keys'])}" if st["roles_missing_keys"] else ""))
+    yield
+
+
+app = FastAPI(title="Ejentic AI Enterprise RAG System", lifespan=lifespan)
+
+# CORS: an explicit allow-list, NOT "*". The old `allow_origins=["*"]` together
+# with `allow_credentials=True` let any web page on the internet read a deployed
+# instance from a visitor's browser. Override for a real deployment with
+# CORS_ORIGINS="https://app.example.com,https://admin.example.com".
+CORS_ORIGINS = [o.strip() for o in os.environ.get(
+    "CORS_ORIGINS", "http://localhost:3002,http://127.0.0.1:3002").split(",") if o.strip()]
 
 app.add_middleware(
     CORSMiddleware,
-    allow_origins=["*"],
+    allow_origins=CORS_ORIGINS,
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization", authmod.API_KEY_HEADER,
+                   "X-Upload-Token"],
+    # The token headers are on the RESPONSE, and a browser cannot read a response
+    # header unless it is explicitly exposed — without this the UI sees them as
+    # absent and silently reports no token usage.
+    expose_headers=["X-Prompt-Tokens", "X-Completion-Tokens", "X-Total-Tokens",
+                    "X-Token-Source", "X-Gated", "X-Saved-Tokens", "X-Clearance"],
 )
-
-
-@app.on_event("startup")
-async def startup_event():
-    await init_db()
-    print("Audit Database Initialized.")
 
 
 class QueryRequest(BaseModel):
     query: str
-    clearance_level: str = "guest"
+    # The clearance a caller ASKS for. It is no longer trusted on its own: the
+    # role comes from the API key, and this may only NARROW it (see auth.py).
+    clearance_level: str = ""
     platform: str = "WEB_UI"
     client: str = ""  # optional; defaults to this instance's active client
+
+
+class IngestRequest(BaseModel):
+    """Body for POST /ingest.
+
+    `rebuild` defaults to FALSE on purpose. The old endpoint always ran a clean
+    rebuild, which deletes every vector in the namespace — one unauthenticated
+    POST wiped the client's whole knowledge base. Destroying data now has to be
+    asked for explicitly, by an admin.
+    """
+    rebuild: bool = False
+    file: str = ""
+
+
+def _authed_role(x_api_key: str | None, authorization: str | None) -> str:
+    """Resolve the caller's role from headers, as an HTTP-ready failure."""
+    try:
+        return authmod.authenticate(
+            authmod.key_from_headers(x_api_key, authorization), CFG)
+    except authmod.AuthError as e:
+        raise authmod.as_http(e)
+
+
+def _clearance_for(role: str, requested: str) -> str:
+    """Narrow-only clearance resolution, as an HTTP-ready failure."""
+    try:
+        return authmod.effective_clearance(role, requested, CFG)
+    except authmod.AuthError as e:
+        raise authmod.as_http(e)
 
 
 # ---------------------------------------------------------------------------
@@ -482,7 +660,12 @@ def _least_privileged_tags(cfg: dict) -> list:
 
 def build_clearance_filter(clearance_level: str, cfg: dict | None = None):
     cfg = cfg or CFG
-    level = (clearance_level or "").strip().lower()
+    # Coerce defensively. Pydantic gives us a str through the API, but this is the
+    # function that decides what a caller can SEE, and every internal caller must
+    # get a fail-closed filter rather than an AttributeError. A 500 here would be a
+    # crash on the security path — noisy, but also a worse failure than a refusal.
+    level = clearance_level if isinstance(clearance_level, str) else ""
+    level = level.strip().lower()
     tags = cfg["clearance_levels"].get(level)
 
     if tags == "*":
@@ -552,7 +735,7 @@ async def rewrite_query(query: str, meter=None) -> str:
                 "rewritten query — no quotes, no preamble.")),
             ChatMessage(role=MessageRole.USER, content=query),
         ]
-        resp = await _retry_achat(messages, meter=meter)
+        resp = await _retry_achat(messages)
         rewritten = (resp.message.content or "").strip().strip('"').split("\n")[0]
         # Meter the rewrite hop — it's a real (if small) token spend on the query.
         if meter is not None:
@@ -570,9 +753,13 @@ async def rewrite_query(query: str, meter=None) -> str:
 # ---------------------------------------------------------------------------
 # Step 2b/2c — Retrieve (hybrid or dense) then rerank
 # ---------------------------------------------------------------------------
-async def retrieve_and_rerank(query: str, clearance_level: str, meter=None):
+async def retrieve_and_rerank(query: str, clearance_level: str, meter=None,
+                              upload_token: str = ""):
     """Returns (nodes, max_raw_score, rewritten_query). `nodes` is the reranked,
-    length-capped top-N ready for grounded synthesis."""
+    length-capped top-N ready for grounded synthesis.
+
+    `upload_token` folds in ONLY the PDF that this caller uploaded (see /upload).
+    """
     filters = build_clearance_filter(clearance_level)
     search_query = await rewrite_query(query, meter=meter)
 
@@ -588,11 +775,14 @@ async def retrieve_and_rerank(query: str, clearance_level: str, meter=None):
 
     raw_nodes = await retriever.aretrieve(search_query)
 
-    # Fold in a user-uploaded PDF (if any) so it competes in the same rerank.
-    # The upload is the caller's own document, so it isn't clearance-filtered.
-    if pdf_index is not None:
+    # Fold in THIS CALLER'S uploaded PDF (only if they presented its token) so it
+    # competes in the same rerank. It isn't clearance-filtered because it is the
+    # caller's own document — which is exactly why it must not be shared: without
+    # the token check, everyone's queries would retrieve everyone's uploads.
+    own_pdf = _upload_index(upload_token)
+    if own_pdf is not None:
         try:
-            pdf_retriever = pdf_index.as_retriever(similarity_top_k=3)
+            pdf_retriever = own_pdf.as_retriever(similarity_top_k=3)
             raw_nodes = list(raw_nodes) + list(await pdf_retriever.aretrieve(search_query))
         except Exception as e:
             print(f"[upload] pdf retrieval skipped: {e}")
@@ -642,11 +832,18 @@ def _messages_text(messages) -> str:
 
 
 def _estimate_gate_savings(question: str, nodes) -> int:
-    """When the confidence gate skips synthesis, estimate the INPUT tokens we
-    avoided by not sending the grounded prompt. A conservative floor: it counts
-    the prompt we didn't send, not the answer we didn't generate."""
+    """When the confidence gate skips synthesis, estimate the INPUT tokens avoided.
+
+    HONESTY NOTE: this must price the prompt we WOULD ACTUALLY HAVE SENT. The
+    grounded prompt only ever carries the top RERANK_TOP_N sources, so counting
+    every retrieved node inflated the figure whenever retrieval returned a wide
+    but low-scoring set — the savings metric flattered itself exactly when the
+    gate fired most. Trim first, then count. Still a conservative floor: it counts
+    the prompt not sent, never the answer not generated.
+    """
     try:
-        return estimate_tokens(_messages_text(_build_grounded_messages(question, nodes)))
+        would_send = list(nodes)[:RERANK_TOP_N]
+        return estimate_tokens(_messages_text(_build_grounded_messages(question, would_send)))
     except Exception:
         return 0
 
@@ -657,11 +854,14 @@ def _passes_confidence(nodes, max_raw_score: float) -> bool:
     return bool(nodes) and max_raw_score >= CONFIDENCE_THRESHOLD
 
 
+_ASSISTANT_MARKER = "assistant:"
+
+
 def _strip_assistant_prefix(text: str) -> str:
     # Some LlamaIndex/LLM paths echo a leading "assistant:" role marker.
     stripped = text.lstrip()
-    if stripped.lower().startswith("assistant:"):
-        return stripped[len("assistant:"):].lstrip()
+    if stripped.lower().startswith(_ASSISTANT_MARKER):
+        return stripped[len(_ASSISTANT_MARKER):].lstrip()
     return text
 
 
@@ -692,10 +892,53 @@ def _plain_delta(delta: str) -> str:
     return delta.replace("*", "").replace("`", "") if delta else delta
 
 
+def _could_be_marker_prefix(buffer: str) -> bool:
+    """Could this partial buffer still grow into a leading 'assistant:' marker?
+
+    THE BUG THIS FIXES: the old inline check asked
+    `buffer.startswith("assistant")`, which is the wrong direction for a PARTIAL
+    buffer. With buffer="A" that is False, so the code decided "not a marker" and
+    flushed immediately — meaning a real `assistant:` arriving split across deltas
+    ("A" + "ssistant:" + " Hi") sailed straight through to the user. The right
+    question is whether the MARKER starts with the buffer.
+    """
+    probe = buffer.lstrip().lower()
+    if not probe:
+        return True   # nothing to judge yet; keep holding
+    return _ASSISTANT_MARKER.startswith(probe)
+
+
+def _consume_prefix_delta(buffer: str, delta: str):
+    """Feed one streamed delta through the marker check.
+
+    Returns (new_buffer, text_to_yield, done_checking). While the buffer could
+    still become 'assistant:' we hold it; the moment it can't, we release it
+    unchanged; once the full marker is in hand we strip it and release the rest.
+    Extracted from answer_stream so this fiddly state machine is unit-testable.
+
+    Anything released here is the FIRST text of the answer, so it is left-stripped:
+    without that, a marker arriving one character at a time consumed 'assistant:'
+    and then let the following space through, so the answer began with whitespace
+    while the same marker in a single delta came out clean. Releasing nothing keeps
+    us in checking mode rather than declaring the prefix handled.
+    """
+    buffer += delta
+    if len(buffer.lstrip()) >= len(_ASSISTANT_MARKER):
+        # Enough characters to decide for certain.
+        out = _strip_assistant_prefix(buffer).lstrip()
+        return ("", out, True) if out else ("", "", False)
+    if not _could_be_marker_prefix(buffer):
+        # It can never become the marker -> release verbatim, stop checking.
+        out = buffer.lstrip()
+        return ("", out, True) if out else ("", "", False)
+    return buffer, "", False    # still ambiguous: keep buffering
+
+
 # ---------------------------------------------------------------------------
 # Answer producers (shared by both endpoints)
 # ---------------------------------------------------------------------------
-async def answer_once(query: str, clearance_level: str, platform: str):
+async def answer_once(query: str, clearance_level: str, platform: str,
+                      upload_token: str = ""):
     """Non-streaming answer for /api/rag (n8n). Returns (text, meter, gated,
     saved_tokens) so the endpoint can surface token counts in headers without
     touching the frozen JSON body."""
@@ -703,7 +946,8 @@ async def answer_once(query: str, clearance_level: str, platform: str):
     if global_index is None:
         return "System Offline: AI Core is booting or missing API keys.", meter, False, 0
     try:
-        nodes, max_score, _ = await retrieve_and_rerank(query, clearance_level, meter=meter)
+        nodes, max_score, _ = await retrieve_and_rerank(
+            query, clearance_level, meter=meter, upload_token=upload_token)
         if not _passes_confidence(nodes, max_score):
             saved = _estimate_gate_savings(query, nodes)
             asyncio.create_task(log_query(
@@ -711,11 +955,12 @@ async def answer_once(query: str, clearance_level: str, platform: str):
                 prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
                 total_tokens=meter.total_tokens, estimated_saved_tokens=saved,
                 token_source=meter.source if meter.total_tokens else "gate", gated=True,
+                client=ACTIVE_CLIENT,
             ))
             return ESCALATION_LINE, meter, True, saved
 
         messages = _build_grounded_messages(query, nodes)
-        resp = await _retry_achat(messages, meter=meter)
+        resp = await _retry_achat(messages)
         text = _strip_markdown(_strip_assistant_prefix((resp.message.content or "").strip()))
         meter.record_response(
             resp, fallback_prompt_text=_messages_text(messages), fallback_completion_text=text
@@ -724,14 +969,17 @@ async def answer_once(query: str, clearance_level: str, platform: str):
             f"{platform}_{clearance_level}", query, text,
             prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
             total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
+            client=ACTIVE_CLIENT,
         ))
         return text, meter, False, 0
     except Exception as e:
-        asyncio.create_task(log_query(f"{platform}_{clearance_level}", query, f"ERROR: {e}"))
+        asyncio.create_task(log_query(f"{platform}_{clearance_level}", query,
+                                      f"ERROR: {e}", client=ACTIVE_CLIENT))
         return f"I encountered a cognitive error while processing that request: {e}", meter, False, 0
 
 
-async def answer_stream(query: str, clearance_level: str, platform: str):
+async def answer_stream(query: str, clearance_level: str, platform: str,
+                        upload_token: str = ""):
     """Async token generator for /chat (Web UI). Yields raw text chunks; the
     endpoint wraps each into the SSE `data: {"chunk": ...}` envelope."""
     if global_index is None:
@@ -739,7 +987,8 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
         return
 
     meter = TokenMeter()
-    nodes, max_score, _ = await retrieve_and_rerank(query, clearance_level, meter=meter)
+    nodes, max_score, _ = await retrieve_and_rerank(
+        query, clearance_level, meter=meter, upload_token=upload_token)
     if not _passes_confidence(nodes, max_score):
         saved = _estimate_gate_savings(query, nodes)
         asyncio.create_task(log_query(
@@ -747,6 +996,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
             prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
             total_tokens=meter.total_tokens, estimated_saved_tokens=saved,
             token_source=meter.source if meter.total_tokens else "gate", gated=True,
+            client=ACTIVE_CLIENT,
         ))
         yield ESCALATION_LINE
         return
@@ -763,21 +1013,14 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
                 continue
             collected.append(delta)
 
-            # Strip a leading "assistant:" that may arrive split across deltas:
-            # buffer until we've seen enough to decide, then flush once.
+            # Strip a leading "assistant:" that may arrive split across deltas.
+            # The state machine lives in _consume_prefix_delta so it can be tested
+            # directly — the inline version had an inverted prefix check that let a
+            # split marker through.
             if not prefix_checked:
-                buffer += delta
-                if len(buffer) < len("assistant:") and not buffer.strip().lower().startswith("assistant"):
-                    prefix_checked = True
-                    yield buffer
-                    buffer = ""
-                    continue
-                if len(buffer) >= len("assistant:"):
-                    prefix_checked = True
-                    cleaned = _strip_assistant_prefix(buffer)
-                    if cleaned:
-                        yield cleaned
-                    buffer = ""
+                buffer, out, prefix_checked = _consume_prefix_delta(buffer, delta)
+                if out:
+                    yield out
                 continue
 
             yield delta
@@ -811,6 +1054,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
             (delivered + "\n\n" + text).strip() if delivered else text,
             prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
             total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
+            client=ACTIVE_CLIENT,
         ))
         fallback_handled = True
         return
@@ -825,6 +1069,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
                     f"{platform}_{clearance_level}", query, full,
                     prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
                     total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
+                    client=ACTIVE_CLIENT,
                 ))
 
 
@@ -833,6 +1078,9 @@ async def answer_stream(query: str, clearance_level: str, platform: str):
 # ---------------------------------------------------------------------------
 @app.get("/")
 def read_root():
+    """Liveness. Deliberately PUBLIC (load balancers and uptime checks need it),
+    and it reports the auth posture so an UNPROTECTED instance is visible at a
+    glance rather than assumed safe. It exposes no key and no env-var name."""
     return {
         "status": "ok",
         "message": "Ejentic AI Enterprise RAG System — Core Intelligence Active.",
@@ -843,14 +1091,50 @@ def read_root():
         "index": INDEX_NAME,
         "token_metering": True,
         "metrics_endpoint": "/metrics",
+        "auth": authmod.status(CFG),
+    }
+
+
+@app.get("/whoami")
+def whoami(x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
+           authorization: str | None = Header(default=None)):
+    """What the presented key grants. Authenticated, and tells the caller only
+    about ITSELF.
+
+    This exists so a UI can DISPLAY the caller's clearance instead of offering a
+    dropdown to choose it. The old dropdown was the vulnerability in miniature: it
+    implied the browser decides its own clearance. Now the key decides, and the UI
+    asks the server what that key is worth.
+
+    It lists the roles this key could narrow TO, so a UI can offer a genuine
+    narrowing control (an executive previewing the guest view) without ever being
+    able to offer widening — that list is computed server-side from the key."""
+    role = _authed_role(x_api_key, authorization)
+    levels = CFG.get("clearance_levels") or {}
+    can_narrow_to = sorted(
+        r for r in levels if authmod._rank(r, CFG) <= authmod._rank(role, CFG)
+    )
+    return {
+        "client": ACTIVE_CLIENT,
+        "role": role,
+        "clearance_tags": ("*" if levels.get(role) == "*"
+                           else list(levels.get(role) or [])),
+        "can_narrow_to": can_narrow_to,
+        "auth_required": authmod.is_enabled(CFG),
+        "is_admin": role == authmod.auth_config(CFG)["admin_role"],
     }
 
 
 @app.get("/clients")
-def clients():
+def clients(x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
+            authorization: str | None = Header(default=None)):
     """Admin surface: every registered client config (data, not code). Lets
     operators see which deployments exist and what each serves without digging
-    through backend/clients/. READ ONLY — changing a client is editing JSON."""
+    through backend/clients/. READ ONLY — changing a client is editing JSON.
+
+    Authenticated: this describes tenant topology (indexes, namespaces, models),
+    which is reconnaissance material and not a liveness signal."""
+    _authed_role(x_api_key, authorization)
     return {
         "active_client": ACTIVE_CLIENT,
         "client_count": len(registry.list_clients()),
@@ -859,11 +1143,20 @@ def clients():
 
 
 @app.post("/chat")
-async def chat(request: QueryRequest):
+async def chat(request: QueryRequest,
+               x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
+               authorization: str | None = Header(default=None),
+               x_upload_token: str | None = Header(default=None)):
     """Web UI endpoint — Server-Sent Events. Emits `data: {"chunk": "..."}\\n\\n`
-    per token and a terminating `data: [DONE]\\n\\n`."""
+    per token and a terminating `data: [DONE]\\n\\n`.
+
+    Authentication happens BEFORE the StreamingResponse is created, so a 401/403
+    is a normal JSON error the client can read — raising inside the generator
+    would arrive as a 200 with an error event, which is far easier to miss."""
     if global_index is None:
         raise HTTPException(status_code=500, detail="Agent not initialized.")
+    role = _authed_role(x_api_key, authorization)
+    clearance = _clearance_for(role, request.clearance_level)
     try:
         resolve_request_client(request.client)
     except ValueError as e:
@@ -872,7 +1165,8 @@ async def chat(request: QueryRequest):
     async def event_generator():
         try:
             async for piece in answer_stream(
-                request.query, request.clearance_level, request.platform
+                request.query, clearance, request.platform,
+                upload_token=x_upload_token or "",
             ):
                 yield f"data: {json.dumps({'chunk': piece})}\n\n"
             yield "data: [DONE]\n\n"
@@ -883,12 +1177,16 @@ async def chat(request: QueryRequest):
     return StreamingResponse(
         event_generator(),
         media_type="text/event-stream",
-        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no",
+                 "X-Clearance": clearance},
     )
 
 
 @app.post("/api/rag")
-async def n8n_rag_endpoint(request: QueryRequest):
+async def n8n_rag_endpoint(request: QueryRequest,
+                           x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
+                           authorization: str | None = Header(default=None),
+                           x_upload_token: str | None = Header(default=None)):
     """n8n orchestration endpoint — strict JSON in, strict JSON out.
     Returns `{"status": "success", "response": "..."}`.
 
@@ -896,10 +1194,13 @@ async def n8n_rag_endpoint(request: QueryRequest):
     stays byte-for-byte compatible with the frozen contract n8n depends on."""
     if global_index is None:
         raise HTTPException(status_code=500, detail="Agent not initialized.")
+    role = _authed_role(x_api_key, authorization)
+    clearance = _clearance_for(role, request.clearance_level)
     try:
         resolve_request_client(request.client)
         response_text, meter, gated, saved = await answer_once(
-            request.query, request.clearance_level, request.platform
+            request.query, clearance, request.platform,
+            upload_token=x_upload_token or "",
         )
         headers = {
             "X-Prompt-Tokens": str(meter.prompt_tokens),
@@ -908,10 +1209,15 @@ async def n8n_rag_endpoint(request: QueryRequest):
             "X-Token-Source": meter.source,
             "X-Gated": "true" if gated else "false",
             "X-Saved-Tokens": str(saved),
+            # Which clearance actually applied, after narrowing. Lets a caller see
+            # that its request was honoured at a lower level than it asked for.
+            "X-Clearance": clearance,
         }
         return JSONResponse(
             content={"status": "success", "response": response_text}, headers=headers
         )
+    except HTTPException:
+        raise
     except ValueError as e:
         raise HTTPException(status_code=409, detail=str(e))
     except Exception as e:
@@ -919,11 +1225,16 @@ async def n8n_rag_endpoint(request: QueryRequest):
 
 
 @app.get("/metrics")
-async def metrics():
+async def metrics(x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
+                  authorization: str | None = Header(default=None)):
     """Token-accounting dashboard data: lifetime totals (prompt/completion/total
     tokens, queries answered vs. gated, estimated tokens saved by the confidence
-    gate) plus the most recent per-query rows. Pure DB read — costs no tokens."""
-    data = await get_token_metrics(limit=20)
+    gate) plus the most recent per-query rows. Pure DB read — costs no tokens.
+
+    Authenticated: `recent` contains real user QUERY TEXT, so this is a privacy
+    surface, not a public dashboard. Scoped to this tenant's rows only."""
+    _authed_role(x_api_key, authorization)
+    data = await get_token_metrics(limit=20, client=ACTIVE_CLIENT)
     data["config"] = {
         "client": ACTIVE_CLIENT,
         "llm_model": LLM_MODEL,
@@ -936,17 +1247,53 @@ async def metrics():
 
 
 @app.post("/ingest")
-async def trigger_ingestion():
+async def trigger_ingestion(
+    request: IngestRequest | None = None,
+    x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
+    authorization: str | None = Header(default=None),
+):
+    """Re-run ingestion. ADMIN ONLY, and APPEND by default.
+
+    This endpoint used to be unauthenticated AND always ran a clean rebuild —
+    `ingest_knowledge.py` with no --append calls reset_namespace(), which is
+    `delete(delete_all=True)`. One anonymous POST therefore wiped the client's
+    entire knowledge base. Two changes: only the admin role may call it, and
+    destroying data now requires asking for it explicitly with {"rebuild": true}.
+    """
     import subprocess
+
+    role = _authed_role(x_api_key, authorization)
     try:
-        # Canonical, clearance-aware ingestion (see ingest_knowledge.py / RUNBOOK.md).
-        # NOT scrape_and_ingest.py, which ingests untagged docs and makes the KB
-        # invisible to every non-executive role.
+        authmod.require_admin(role, CFG)
+    except authmod.AuthError as e:
+        raise authmod.as_http(e)
+
+    req = request or IngestRequest()
+    # Canonical, clearance-aware ingestion (see ingest_knowledge.py / RUNBOOK.md).
+    cmd = [sys.executable, "ingest_knowledge.py"]
+    if not req.rebuild:
+        cmd.append("--append")
+    if req.file:
+        # Guard the shell-adjacent argument: a knowledge file must be a plain
+        # filename inside backend/, never a path that walks out of it.
+        safe = os.path.basename(req.file.strip())
+        if not safe or not safe.endswith(".json"):
+            raise HTTPException(status_code=400,
+                                detail="file must be a .json filename in backend/")
+        cmd += ["--file", safe]
+
+    try:
         result = subprocess.run(
-            [sys.executable, "ingest_knowledge.py"],
-            capture_output=True, text=True, check=True,
+            cmd, capture_output=True, text=True, check=True,
+            cwd=os.path.dirname(os.path.abspath(__file__)),
         )
-        return {"status": "success", "message": "Ingestion completed successfully", "logs": result.stdout}
+        return {
+            "status": "success",
+            "message": ("Rebuilt index (namespace cleared first)." if req.rebuild
+                        else "Ingestion completed (appended; nothing deleted)."),
+            "rebuild": req.rebuild,
+            "logs": result.stdout,
+        }
     except subprocess.CalledProcessError as e:
         raise HTTPException(status_code=500, detail=f"Ingestion failed: {e.stderr}")
     except Exception as e:
@@ -1017,42 +1364,103 @@ def _extract_pdf_documents(path, filename):
     return docs, skipped
 
 
-@app.post("/upload")
-async def upload_pdf(file: UploadFile = File(...)):
-    """Ingest a one-off PDF into an in-memory index. Subsequent queries fold its
-    chunks into the same retrieve->rerank pipeline (no clearance filter, since
-    it's the caller's own document). The index survives restarts via the
-    startup auto-re-index of data/uploads (see below)."""
-    global pdf_index
+def _load_upload_documents(path, filename):
+    """Read one stored upload into Documents, preferring the pypdf path."""
+    if str(filename).lower().endswith(".pdf") and PdfReader is not None:
+        return _extract_pdf_documents(path, filename)
+    return SimpleDirectoryReader(input_files=[str(path)]).load_data(), 0
 
-    upload_dir = "data/uploads"
+
+# Uploads: what we accept, and how big. A generated name + an extension allow-list
+# is what keeps a hostile filename from choosing where the file lands.
+ALLOWED_UPLOAD_EXT = {".pdf", ".txt", ".md"}
+MAX_UPLOAD_BYTES = int(os.environ.get("MAX_UPLOAD_BYTES", str(20 * 1024 * 1024)))
+
+
+def _safe_upload_path(upload_dir: str, original_name: str) -> str:
+    """Where to store an upload, chosen by US rather than by the uploader.
+
+    THE BUG THIS FIXES: the old code did os.path.join(upload_dir, file.filename)
+    with no sanitisation, so a filename of "../../../../tmp/pwned.pdf" resolved
+    outside the upload directory — an arbitrary file write from an unauthenticated
+    POST. Two independent defences, because one is never enough here:
+      1. the stored name is generated (random hex + a validated extension), so no
+         caller-supplied character reaches the filesystem at all, and
+      2. we still assert the resolved path stays inside upload_dir, which catches
+         anything a future refactor might reintroduce.
+    """
+    ext = os.path.splitext(original_name or "")[1].lower()
+    if ext not in ALLOWED_UPLOAD_EXT:
+        raise HTTPException(
+            status_code=400,
+            detail=f"unsupported file type {ext or '(none)'}; allowed: "
+                   f"{', '.join(sorted(ALLOWED_UPLOAD_EXT))}",
+        )
+    root = os.path.realpath(upload_dir)
+    path = os.path.realpath(os.path.join(root, f"{secrets.token_hex(16)}{ext}"))
+    if os.path.commonpath([root, path]) != root:
+        raise HTTPException(status_code=400, detail="invalid upload path")
+    return path
+
+
+@app.post("/upload")
+async def upload_pdf(file: UploadFile = File(...),
+                     x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
+                     authorization: str | None = Header(default=None)):
+    """Ingest a one-off document into an in-memory index PRIVATE to the caller.
+
+    Returns an `upload_token`; send it back as the `X-Upload-Token` header on
+    /chat or /api/rag to have that document folded into the retrieve->rerank
+    pipeline. It is not clearance-filtered — it is the caller's own file — which
+    is precisely why it is token-scoped rather than global: the old code kept ONE
+    process-wide index and mixed it into every caller's queries.
+    """
+    _authed_role(x_api_key, authorization)
+
+    upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "uploads")
     os.makedirs(upload_dir, exist_ok=True)
-    file_path = os.path.join(upload_dir, file.filename)
-    with open(file_path, "wb") as buffer:
-        shutil.copyfileobj(file.file, buffer)
+    file_path = _safe_upload_path(upload_dir, file.filename or "")
+
+    # Stream to disk with a hard size cap so one request can't fill the volume.
+    size = 0
+    try:
+        with open(file_path, "wb") as buffer:
+            while True:
+                block = await file.read(1024 * 1024)
+                if not block:
+                    break
+                size += len(block)
+                if size > MAX_UPLOAD_BYTES:
+                    raise HTTPException(
+                        status_code=413,
+                        detail=f"file exceeds the {MAX_UPLOAD_BYTES // (1024*1024)}MB limit",
+                    )
+                buffer.write(block)
+    except HTTPException:
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise
 
     try:
-        print(f"Parsing uploaded PDF: {file.filename}")
-        if file.filename.lower().endswith(".pdf") and PdfReader is not None:
-            documents, skipped = _extract_pdf_documents(file_path, file.filename)
-            if skipped:
-                print(f"[upload] skipped {skipped} unreadable page(s)")
-        else:
-            documents = SimpleDirectoryReader(input_files=[file_path]).load_data()
-            skipped = 0
+        print(f"Parsing upload: {file.filename!r} -> {os.path.basename(file_path)}")
+        documents, skipped = _load_upload_documents(file_path, file.filename or "")
+        if skipped:
+            print(f"[upload] skipped {skipped} unreadable page(s)")
     except HTTPException:
+        if os.path.exists(file_path):
+            os.remove(file_path)
         raise
     except Exception as e:
-        raise HTTPException(
-            status_code=500,
-            detail=f"Failed to parse PDF: {_short(e)}",
-        )
+        if os.path.exists(file_path):
+            os.remove(file_path)
+        raise HTTPException(status_code=500, detail=f"Failed to parse upload: {_short(e)}")
 
     extracted = sum(len((d.text or "").strip()) for d in documents)
     if extracted < 50:
         # Previously this failed SILENTLY: the 200 response masked a no-op
         # index, so the user believed their doc was queryable when it wasn't.
-        pdf_index = None
+        if os.path.exists(file_path):
+            os.remove(file_path)
         raise HTTPException(
             status_code=400,
             detail=(
@@ -1063,7 +1471,8 @@ async def upload_pdf(file: UploadFile = File(...)):
             ),
         )
 
-    pdf_index = VectorStoreIndex.from_documents(documents)  # in-memory
+    token = _remember_upload(VectorStoreIndex.from_documents(documents),
+                             file.filename or "", file_path)
     print(f"[upload] {file.filename}: {len(documents)} pages, {extracted} chars indexed")
     return {
         "status": "success",
@@ -1071,44 +1480,12 @@ async def upload_pdf(file: UploadFile = File(...)):
             f"Ingested {file.filename} ({len(documents)} pages, "
             f"{extracted} chars). It is now queryable."
         ),
+        "upload_token": token,
+        # Echo the ORIGINAL name for display only. The bytes live under the
+        # generated name from _safe_upload_path; a client that treated this as
+        # a path would be trusting caller-supplied text, which is the bug.
+        "filename": file.filename or "",
     }
-
-
-_startup_reindex_done = False
-
-
-def _startup_reindex_latest_upload() -> None:
-    """Re-index the most recent PDF from a previous session. pdf_index lives
-    only in memory, so WITHOUT this a restart silently forgets the user's
-    uploaded doc while data/uploads still holds the file."""
-    global pdf_index, _startup_reindex_done
-    if _startup_reindex_done or pdf_index is not None:
-        return
-    _startup_reindex_done = True
-    upload_dir = "data/uploads"
-    try:
-        if not os.path.isdir(upload_dir):
-            return
-        pdfs = [f for f in os.listdir(upload_dir) if f.lower().endswith(".pdf")]
-        if not pdfs:
-            return
-        latest = max(pdfs, key=lambda f: os.path.getmtime(os.path.join(upload_dir, f)))
-        path = os.path.join(upload_dir, latest)
-        if PdfReader is not None:
-            docs, _skipped = _extract_pdf_documents(path, latest)
-        else:
-            docs = SimpleDirectoryReader(input_files=[path]).load_data()
-        extracted = sum(len((d.text or "").strip()) for d in docs)
-        if extracted < 50:
-            print(f"[upload] startup re-index skipped (unreadable): {latest}")
-            return
-        pdf_index = VectorStoreIndex.from_documents(docs)
-        print(f"[upload] re-indexed previous upload: {latest} ({extracted} chars)")
-    except Exception as e:
-        print(f"[upload] startup re-index failed: {_short(e)}")
-
-
-_startup_reindex_latest_upload()
 
 
 if __name__ == "__main__":

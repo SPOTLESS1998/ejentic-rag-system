@@ -24,5 +24,14 @@
   },
   "persona_name": "Ejentic Customer Success Agent",
   "persona_style": "professional, precise, and premium in tone",
-  "escalation_line": "I need more context or I don't have that information on hand. Would you like me to escalate you to a human?"
+  "escalation_line": "I need more context or I don't have that information on hand. Would you like me to escalate you to a human?",
+  "auth": {
+    "required": false,
+    "keys": {
+      "guest": "RAG_KEY_GUEST",
+      "employee": "RAG_KEY_EMPLOYEE",
+      "executive": "RAG_KEY_EXECUTIVE"
+    },
+    "admin_role": "executive"
+  }
 }

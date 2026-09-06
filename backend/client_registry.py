@@ -80,6 +80,19 @@ DEFAULT_CONFIG: dict[str, Any] = {
         "I need more context or I don't have that information on hand. "
         "Would you like me to escalate you to a human?"
     ),
+    # --- Authentication: role -> the NAME of the env var holding that role's key.
+    # Never a key value (MULTITENANCY.md). `required: false` is a LOCAL-DEV
+    # default; a deployment that serves anyone must set it true, and validation
+    # below then refuses to boot unless the keys actually exist. See auth.py.
+    "auth": {
+        "required": False,
+        "keys": {
+            "guest": "RAG_KEY_GUEST",
+            "employee": "RAG_KEY_EMPLOYEE",
+            "executive": "RAG_KEY_EXECUTIVE",
+        },
+        "admin_role": "executive",
+    },
 }
 
 REQUIRED_KEYS = {
@@ -88,7 +101,13 @@ REQUIRED_KEYS = {
     "max_context_chars", "hybrid_alpha", "rerank_alpha",
     "query_rewrite_enabled", "chunk_size", "chunk_overlap",
     "clearance_levels", "persona_name", "persona_style", "escalation_line",
+    "auth",
 }
+
+# Keys whose value is a nested object and must be MERGED per-key rather than
+# replaced wholesale — otherwise a client that overrides one sub-key silently
+# drops the rest of the defaults.
+_NESTED_KEYS = ("clearance_levels", "auth")
 
 _loaded: dict[str, dict[str, Any]] | None = None
 
@@ -99,17 +118,41 @@ def _fatal(msg: str) -> None:
 
 
 def _merge(base: dict, override: dict) -> dict:
-    """Deep-ish merge: clearance_levels is nested, everything else is flat."""
+    """Overlay a client's JSON onto the defaults.
+
+    Flat keys are replaced. The two nested keys need care:
+
+    * `clearance_levels` is REPLACED wholesale when the client declares it, not
+      merged. Merging was a real hazard: a tenant declaring only
+      {"partner": ["partner_docs"]} would silently INHERIT our default
+      `"executive": "*"` — an unrestricted role they never asked for and cannot
+      remove. A tenant's role map must be exactly what they wrote.
+    * `auth` merges at its top level (so a client can flip `required` without
+      restating every key name) but its `keys` map is likewise REPLACED when
+      given, for the same reason: inherited roles are roles nobody chose.
+    """
     out = dict(base)
-    out.update({k: v for k, v in override.items() if k != "clearance_levels"})
-    if isinstance(override.get("clearance_levels"), dict):
-        merged_roles: dict[str, Any] = {
+    out.update({k: v for k, v in override.items() if k not in _NESTED_KEYS})
+
+    if isinstance(override.get("clearance_levels"), dict) and override["clearance_levels"]:
+        out["clearance_levels"] = {
+            role: (list(tags) if isinstance(tags, list) else tags)
+            for role, tags in override["clearance_levels"].items()
+        }
+    else:
+        out["clearance_levels"] = {
             role: (list(tags) if isinstance(tags, list) else tags)
             for role, tags in base.get("clearance_levels", {}).items()
         }
-        for role, tags in override["clearance_levels"].items():
-            merged_roles[role] = list(tags) if isinstance(tags, list) else tags
-        out["clearance_levels"] = merged_roles
+
+    merged_auth = dict(base.get("auth") or {})
+    over_auth = override.get("auth")
+    if isinstance(over_auth, dict):
+        merged_auth.update({k: v for k, v in over_auth.items() if k != "keys"})
+        if isinstance(over_auth.get("keys"), dict):
+            merged_auth["keys"] = dict(over_auth["keys"])
+    merged_auth["keys"] = dict(merged_auth.get("keys") or {})
+    out["auth"] = merged_auth
     return out
 
 
@@ -130,6 +173,98 @@ def _validate(cfg: dict, source: str) -> None:
     for flt in ("confidence_threshold", "hybrid_alpha", "rerank_alpha"):
         if not isinstance(cfg[flt], (int, float)) or not (0.0 <= float(cfg[flt]) <= 1.0):
             _fatal(f"{source}: '{flt}' must be between 0 and 1")
+    _validate_auth(cfg, source)
+
+
+def _validate_auth(cfg: dict, source: str) -> None:
+    """Auth must be coherent, and 'required' must actually be enforceable.
+
+    THE POINT OF THIS FUNCTION: an instance that declares `required: true` but has
+    no key values in its environment cannot authenticate anybody. Left unchecked
+    that would degrade to "nobody can get in" at best and, with a bug, to open
+    access at worst. Either way it is a configuration error, so we refuse to boot
+    here — loudly, at load, before a single query is served.
+    """
+    auth = cfg.get("auth")
+    if not isinstance(auth, dict):
+        _fatal(f"{source}: 'auth' must be an object (see auth.py)")
+
+    keys = auth.get("keys")
+    if not isinstance(keys, dict):
+        _fatal(f"{source}: auth.keys must be an object mapping role -> env var NAME")
+
+    levels = cfg["clearance_levels"]
+    for role, env_name in keys.items():
+        if not isinstance(env_name, str) or not env_name.strip():
+            _fatal(f"{source}: auth.keys[{role!r}] must be the NAME of an env var")
+        # Guard against the mistake this pattern exists to prevent: a real secret
+        # pasted where an env-var name belongs. Names are SHOUTY_SNAKE_CASE.
+        if not env_name.strip().replace("_", "").isalnum() or env_name != env_name.upper():
+            _fatal(
+                f"{source}: auth.keys[{role!r}] = {env_name!r} does not look like an "
+                f"env var NAME (expected e.g. 'RAG_KEY_{role.upper()}'). Never put a "
+                f"key value in config — see MULTITENANCY.md."
+            )
+        if role not in levels:
+            _fatal(
+                f"{source}: auth.keys has role {role!r}, which is not in "
+                f"clearance_levels ({', '.join(sorted(levels))}). A key that grants "
+                f"a role the retriever doesn't know would fail closed on every query."
+            )
+
+    admin = auth.get("admin_role")
+    if admin is not None and admin != "":
+        if not isinstance(admin, str) or admin not in keys:
+            _fatal(
+                f"{source}: auth.admin_role {admin!r} must be one of the roles in "
+                f"auth.keys ({', '.join(sorted(keys))}) — otherwise no caller could "
+                f"ever perform administrative actions."
+            )
+
+    if auth.get("required"):
+        if not keys:
+            _fatal(
+                f"{source}: auth.required is true but auth.keys is empty — no caller "
+                f"could ever be authenticated. Declare role -> env-var names."
+            )
+        unset = [f"{role} ({env})" for role, env in sorted(keys.items())
+                 if not (os.environ.get(env) or "").strip()]
+        if len(unset) == len(keys):
+            _fatal(
+                f"{source}: auth.required is true but NONE of the key env vars are "
+                f"set: {', '.join(unset)}. Generate one per role with "
+                f"`openssl rand -hex 32` and add them to backend/.env. Refusing to "
+                f"boot rather than serve an instance that cannot authenticate."
+            )
+        if unset:
+            print(
+                f"WARNING: {source}: auth is on but these roles have no key set, so "
+                f"they cannot be used: {', '.join(unset)}",
+                file=sys.stderr,
+            )
+
+
+def tenant_clearance_tags(cfg: dict) -> list:
+    """Every stored `clearance` tag this tenant's roles can refer to.
+
+    ONE SOURCE OF TRUTH for the tag vocabulary, shared by retrieval and ingestion.
+    Ingestion used to hardcode {"public","internal","executive"}, so a tenant whose
+    tiers are e.g. partner/legal could not ingest without editing Python — exactly
+    the kind of business fact MULTITENANCY.md forbids in code.
+
+    A wildcard role ("*") grants everything and therefore names no tag of its own,
+    so it contributes nothing here; the tags come from the explicit lists.
+    """
+    seen, out = set(), []
+    for tags in (cfg.get("clearance_levels") or {}).values():
+        if not isinstance(tags, list):
+            continue  # "*" — sees all tags, defines none
+        for tag in tags:
+            t = (tag or "").strip() if isinstance(tag, str) else ""
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+    return out
 
 
 def _load_all() -> dict[str, dict[str, Any]]:
