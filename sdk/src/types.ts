@@ -11,13 +11,20 @@
  *  multi-tenant guard; it must match the instance's RAG_CLIENT or the backend
  *  answers HTTP 409. */
 export interface RAGQueryOptions {
-  /** Clearance role of the caller: maps to stored clearance tags server-side
-   *  (default client: "guest" | "employee" | "executive"). Fail-closed. */
+  /** Clearance role to answer AS. The backend derives your real role from the
+   *  API key and only ever NARROWS: you may request a role your key already
+   *  covers or below (an executive key asking for the "guest" view), but asking
+   *  for MORE than your key grants is HTTP 403, never a silent downgrade.
+   *  Omit it to get everything your key grants. */
   clearanceLevel?: string;
   /** Where the query originates, for audit-log labelling. */
   platform?: string;
   /** Target client id. Defaults to the backend instance's active client. */
   client?: string;
+  /** Token from a prior `upload()`, to fold that document into THIS query's
+   *  context. Uploads are per-caller: without the token the backend does not
+   *  see the document, and no other caller ever can. */
+  uploadToken?: string;
   /** Abort signal (cancels the HTTP call). */
   signal?: AbortSignal;
 }
@@ -98,6 +105,22 @@ export interface ClientsResponse {
   clients: ClientSummary[];
 }
 
+/** Auth posture reported by `GET /`. Exposes no key and no env-var value —
+ *  only WHETHER auth is on and which roles are usable, so an unprotected
+ *  instance is visible at a glance instead of being assumed safe. */
+export interface AuthStatus {
+  /** False means the instance accepts unauthenticated callers (local dev only). */
+  required: boolean;
+  /** Every role declared in the client's config. */
+  roles: string[];
+  /** Roles whose key env var is actually set — the ones that can be used. */
+  roles_with_keys_set: string[];
+  /** Declared roles with no key set: unusable until a key is provided. */
+  roles_missing_keys: string[];
+  /** Role permitted to call administrative endpoints (e.g. POST /ingest). */
+  admin_role: string | null;
+}
+
 /** Shape of `GET /`. */
 export interface HealthResponse {
   status: string;
@@ -109,12 +132,20 @@ export interface HealthResponse {
   index: string;
   token_metering: boolean;
   metrics_endpoint: string;
+  auth: AuthStatus;
 }
 
 /** Shape of `POST /upload`. */
 export interface RAGUploadResponse {
   status: "success";
   message: string;
+  /** Opaque handle for the indexed document. Pass it back as
+   *  `RAGQueryOptions.uploadToken` to query against it. Uploads are scoped to
+   *  whoever holds the token — they are NOT added to the shared index. */
+  upload_token: string;
+  /** The original filename, kept as metadata only. The bytes are stored under a
+   *  server-generated name, so a hostile filename cannot steer the write path. */
+  filename: string;
 }
 
 /** Parsed streaming event from `POST /chat`. */
@@ -127,11 +158,25 @@ export type ChatStreamEvent =
 export interface RAGClientOptions {
   /** Base URL of the RAG backend, e.g. "http://localhost:8002". */
   baseUrl: string;
+  /**
+   * API key for the caller's role, sent as the `X-API-Key` header on every
+   * request. THE KEY IS THE IDENTITY: the backend reads the caller's clearance
+   * from it, so `clearanceLevel` can only narrow within what this key grants.
+   *
+   * Keep it server-side. A key in browser JavaScript is a public key — anyone
+   * who opens devtools has executive clearance. Call the RAG from a server
+   * route (Next.js route handler, API endpoint) that holds the key, and let the
+   * browser talk to that route instead.
+   *
+   * Optional only because a local instance may run with `auth.required: false`.
+   * Any deployment that serves real people sets it.
+   */
+  apiKey?: string;
   /** Default client id sent with every request. */
   client?: string;
   /** Default platform label used for audit logging. */
   platform?: string;
-  /** Request timeout in ms (default 30_000). */
+  /** Request timeout in ms (default 300_000). */
   timeoutMs?: number;
   /** Injectable fetch (for tests / edge runtimes). */
   fetchImpl?: typeof fetch;

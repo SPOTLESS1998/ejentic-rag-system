@@ -49,6 +49,7 @@ function readTokenUsage(res: Response): TokenUsage {
  */
 export class RAGClient {
   private readonly baseUrl: string;
+  private readonly apiKey?: string;
   private readonly client?: string;
   private readonly platform: string;
   private readonly timeoutMs: number;
@@ -57,16 +58,38 @@ export class RAGClient {
   constructor(opts: RAGClientOptions) {
     if (!opts.baseUrl) throw new Error("RAGClient: baseUrl is required");
     this.baseUrl = stripTrailingSlashes(opts.baseUrl);
+    this.apiKey = opts.apiKey;
     this.client = opts.client;
     this.platform = opts.platform ?? "SDK";
     this.timeoutMs = opts.timeoutMs ?? 300_000;
     this.fetchImpl = opts.fetchImpl ?? ((...args) => fetch(...args));
   }
 
+  /**
+   * Merge the auth + upload headers into a request's own headers.
+   *
+   * The key goes on EVERY call in one place, so no endpoint can be added later
+   * that forgets it. Header names match backend/auth.py.
+   */
+  private headers(
+    base: Record<string, string> = {},
+    opts?: RAGQueryOptions,
+  ): Record<string, string> {
+    const out: Record<string, string> = { ...base };
+    if (this.apiKey) out["X-API-Key"] = this.apiKey;
+    const token = opts?.uploadToken;
+    if (token) out["X-Upload-Token"] = token;
+    return out;
+  }
+
   private body(opts?: RAGQueryOptions) {
+    // NOTE: clearance_level defaults to "" — NOT "guest". The backend derives the
+    // real role from the API key; an empty value means "everything my key grants".
+    // Defaulting to "guest" here would silently narrow every executive key down
+    // to public-only answers, which looks exactly like broken retrieval.
     return {
       query: "",
-      clearance_level: (opts?.clearanceLevel ?? "guest").toLowerCase(),
+      clearance_level: (opts?.clearanceLevel ?? "").toLowerCase(),
       platform: opts?.platform ?? this.platform,
       client: opts?.client ?? this.client ?? "",
     };
@@ -115,8 +138,9 @@ export class RAGClient {
     body.query = query;
     const res = await this.rawRequest("/api/rag", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: this.headers({ "Content-Type": "application/json" }, opts),
       body: JSON.stringify(body),
+      signal: opts?.signal,
     });
     if (!res.ok) {
       let detail = res.statusText;
@@ -144,8 +168,12 @@ export class RAGClient {
 
     const res = await this.rawRequest("/chat", {
       method: "POST",
-      headers: { "Content-Type": "application/json", Accept: "text/event-stream" },
+      headers: this.headers(
+        { "Content-Type": "application/json", Accept: "text/event-stream" },
+        opts,
+      ),
       body: JSON.stringify(body),
+      signal: opts?.signal,
     });
     if (!res.ok || !res.body) {
       throw new Error(`RAG chat failed (${res.status}: ${res.statusText})`);
@@ -202,7 +230,13 @@ export class RAGClient {
     return out;
   }
 
-  /** Index a one-off document (PDF/text) for the caller's session — `POST /upload`. */
+  /**
+   * Index a one-off document (PDF/text) just for this caller — `POST /upload`.
+   *
+   * Returns an `upload_token`. Pass it as `uploadToken` on a later `query()` or
+   * `stream()` to search that document; nobody without the token can reach it.
+   * `filename` is metadata only — the server picks the name it writes to disk.
+   */
   async upload(
     file: Blob | File,
     filename: string,
@@ -210,28 +244,35 @@ export class RAGClient {
   ): Promise<RAGUploadResponse> {
     const form = new FormData();
     form.append("file", file, filename);
+    // No Content-Type here on purpose: fetch sets it with the multipart boundary.
     return this.requestJson<RAGUploadResponse>("/upload", {
       method: "POST",
+      headers: this.headers(),
       body: form,
       signal,
     });
   }
 
-  /** Token-accounting dashboard — `GET /metrics`. */
+  /** Token-accounting dashboard — `GET /metrics` (requires a key). */
   async metrics(signal?: AbortSignal): Promise<MetricsResponse> {
-    return this.requestJson<MetricsResponse>("/metrics", { method: "GET", signal });
+    return this.requestJson<MetricsResponse>("/metrics", {
+      method: "GET",
+      headers: this.headers(),
+      signal,
+    });
   }
 
-  /** Registered client configs — `GET /clients` (admin surface). */
+  /** Registered client configs — `GET /clients` (admin surface, requires a key). */
   async clients(signal?: AbortSignal): Promise<ClientSummary[]> {
     const res = await this.requestJson<{ clients: ClientSummary[] }>("/clients", {
       method: "GET",
+      headers: this.headers(),
       signal,
     });
     return res.clients;
   }
 
-  /** Liveness + active client info — `GET /`. */
+  /** Liveness + active client info — `GET /` (public: no key needed). */
   async health(signal?: AbortSignal): Promise<HealthResponse> {
     return this.requestJson<HealthResponse>("/", { method: "GET", signal });
   }
