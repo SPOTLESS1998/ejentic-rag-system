@@ -18,6 +18,7 @@ INGEST                                RETRIEVE                        SYNTHESIZE
 
 | Stage | What runs | Why it matters |
 | ----- | --------- | -------------- |
+| 0. Authentication | `auth.py` — an API key maps to a role; a request may narrow it, never widen | The clearance filter is only as meaningful as the authentication in front of it |
 | 1. Ingestion | `ingest_knowledge.py` (validates + tags), `pdf_to_knowledge.py` | The `clearance` tag is attached here — the security boundary of the whole system |
 | 2. Retrieval | Query rewrite → hybrid (dense+sparse) or dense search → rerank (NVIDIA cross-encoder, else local CE, else dependency-free BM25) | Recall + precision; the reranker floor is always real |
 | 3. Guardrails | Confidence gate, mandatory `[Source N]` citations, grounding-only persona | Hallucination refusal at ~0 answer tokens |
@@ -43,18 +44,75 @@ in `sdk/`.
 ejentic-rag-system/
 ├─ backend/            # FastAPI RAG brain (Python, LlamaIndex + NVIDIA NIM + Pinecone)
 │  ├─ main.py          # Server: retrieval pipeline, guardrails, frozen API contracts
+│  ├─ auth.py          # THE ONLY place a caller's role is decided (API key -> role)
 │  ├─ ingest_knowledge.py  # Canonical clearance-aware ingestion (the ONLY writer to Pinecone)
 │  ├─ client_registry.py   # Multi-tenant config (data-driven, validated JSON)
 │  ├─ clients/ejentic.json # The default client config — copy this to onboard a tenant
+│  ├─ tests/           # Offline suite: no network, no keys (tests/run_all.py)
 │  ├─ eval_rag.py      # Data-driven eval harness (correctness + leak + gate probing)
 │  ├─ verify_clearance.py # Three-role security matrix demo
-│  ├─ database.py      # SQLite audit log + token accounting
+│  ├─ database.py      # Per-tenant SQLite audit log + token accounting
 │  ├─ token_meter.py   # token metering (provider or labelled estimate)
 │  └─ RUNBOOK.md       # Repeatable ingest/verify/eval process
-├─ frontend/           # Next.js chat UI (SSE client)
+├─ frontend/           # Next.js chat UI + server-side proxy that holds the API key
 ├─ sdk/                # @ejentic/rag-sdk — TS client for every Ejentic consumer
+├─ run_e2e_test.sh     # Live end-to-end test (exits non-zero on failure)
 └─ n8n_workflow_template.json  # Telegram -> RAG -> reply workflow
 ```
+
+## Authentication — the key decides the role
+
+**The clearance filter is only as meaningful as the authentication in front of
+it.** This system filters documents by a `clearance` tag, and until `auth.py`
+existed the clearance was simply a field in the request body — so a plain `curl`
+with `"clearance_level": "executive"` and no credential read board-only material.
+Filtering correctly on a role nobody proved is an honour system, not a boundary.
+
+Now the caller presents an API key and **the server derives the role from it**:
+
+```json
+"auth": {
+  "required": true,
+  "keys": {
+    "guest":     "RAG_KEY_GUEST",
+    "employee":  "RAG_KEY_EMPLOYEE",
+    "executive": "RAG_KEY_EXECUTIVE"
+  },
+  "admin_role": "executive"
+}
+```
+
+The config names **environment variables**, never key values (see
+`MULTITENANCY.md`). Generate one key per role and put the values in
+`backend/.env`:
+
+```bash
+openssl rand -hex 32     # once per role -> RAG_KEY_GUEST / _EMPLOYEE / _EXECUTIVE
+```
+
+Send it as `X-API-Key: <key>` (or `Authorization: Bearer <key>`).
+
+**The rules, in short:**
+
+| Rule | Behaviour |
+| ---- | --------- |
+| The key decides the role | `clearance_level` in the body can only **narrow** it |
+| Narrowing is allowed | An executive key may ask for the `guest` view (useful for testing) |
+| Widening is **403** | A guest key asking for `executive` is refused loudly — never silently downgraded |
+| Missing/unknown key | **401**, with no hint about which way you were wrong |
+| `/ingest` | **Admin role only**, and appends by default — a rebuild needs `{"rebuild": true}` |
+| `/metrics`, `/clients`, `/whoami` | Authenticated: they expose query text and tenant topology |
+| `GET /` | Public liveness — and it reports whether auth is on, so an unprotected instance is visible rather than assumed safe |
+| `required: true` with no keys set | **Refuses to boot.** A misconfigured instance must not degrade to open access |
+
+`required: false` is a local-development default. Any deployment that serves
+real people sets it to `true` — and `GET /` will tell you which mode you are in.
+
+> **Never put a key in the browser.** A key in client-side JavaScript is a public
+> key: anyone can read it in devtools and hold that clearance. The Next.js UI
+> talks to its own `/api/rag/*` route handlers, which run on the server, hold
+> `RAG_API_KEY`, and add it on the way out. That is why the UI *displays* your
+> clearance instead of offering a dropdown to choose it.
 
 ## Quickstart
 
@@ -62,20 +120,25 @@ ejentic-rag-system/
 # 1. Backend
 cd backend
 cp .env.example .env            # fill PINECONE_API_KEY + NVIDIA_API_KEY
+                                # (for a protected instance also set RAG_KEY_GUEST/_EMPLOYEE/_EXECUTIVE)
 pip install -r requirements.txt
+python tests/run_all.py         # offline suite — no keys, no network
 python ingest_knowledge.py      # build the index from backend/ejentic_knowledge.json
 python verify_clearance.py      # prove the 3-role security matrix
 uvicorn main:app --port 8002    # serve on :8002
 
 # 2. UI (optional, separate terminal)
-cd ../frontend && npm install && npm run dev   # :3002
+cd ../frontend
+cp .env.example .env.local      # set RAG_API_KEY — SERVER-SIDE only, never NEXT_PUBLIC_
+npm install && npm run dev      # :3002
 
 # 3. TypeScript SDK (for services, agents, pipelines)
 cd ../sdk && npm install && npm test
 ```
 
-Health check: `GET http://localhost:8002/` → `{"status":"ok",
-"...":true, "token_metering": true, ...}`.
+Health check: `GET http://localhost:8002/` → `{"status":"ok", "client":"ejentic",
+"auth": {"required": false, ...}, "token_metering": true, ...}` — the `auth` block
+tells you at a glance whether the instance is protected.
 
 ## Multi-tenancy: one engine, every client
 
@@ -119,8 +182,12 @@ they prove the multi-tenant wiring and the SDK work with **zero API keys**.
 ### 1. Configuration & SDK sanity (no keys needed)
 
 ```bash
-# 1a. Python: registry loads, merges, validates, and fails closed
+# 1a. Python offline suite — auth, clearance, upload safety, streaming, tenancy
 cd backend
+python tests/run_all.py
+# expect: RESULT: N passed, 0 failed  (exit 0) — no network, no API keys touched
+
+# 1b. Python: registry loads, merges, validates, and fails closed
 python3 -c "
 import client_registry as r
 c = r.get_client()
@@ -132,11 +199,11 @@ print('client:', r.active_client_id(), '| clients:', [x['id'] for x in r.list_cl
 RAG_CLIENT=bogus python3 -c "import client_registry as r; r.active_client_id()"
 # expect: ERROR: RAG_CLIENT='bogus' is not registered. ...  (fail closed, exit 1)
 
-# 1b. TypeScript SDK: typecheck, unit tests (mock server), build
+# 1c. TypeScript SDK: typecheck, unit tests (mock server), build
 cd ../sdk
 npm install
 npm run typecheck   # 0 errors
-npm test            # 9 passing
+npm test            # passing (includes apiKey -> X-API-Key header test)
 npm run build       # emits dist/
 ```
 
@@ -166,27 +233,55 @@ uvicorn main:app --port 8002
 ### 3. Verify the live API surface (server running)
 
 ```bash
-# health — proves the active client + config wiring
+# health — public, and reports whether auth is on (so an open instance is visible)
 curl -s http://localhost:8002/ | python3 -m json.tool
-#  { "client": "ejentic", "client_name": "...", "index": "ejentic-global", "token_metering": true, ... }
+#  { "client": "ejentic", "index": "ejentic-global", "auth": {"required": true, ...}, "token_metering": true, ... }
 
-# multi-tenant registry (new endpoint)
-curl -s http://localhost:8002/clients | python3 -m json.tool
+# multi-tenant registry — now authenticated (leaks tenant topology)
+curl -s -H "X-API-Key: $RAG_KEY_EXECUTIVE" http://localhost:8002/clients | python3 -m json.tool
 #  { "active_client": "ejentic", "client_count": 1, "clients": [ { "id": "ejentic", ... } ] }
 
-# grounded answer + X-* token headers
+# grounded answer + X-* token headers (role comes FROM the key, not the body)
 curl -s -D - -X POST http://localhost:8002/api/rag \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"What services does Ejentic offer?","clearance_level":"guest","platform":"curl"}'
+  -H "X-API-Key: $RAG_KEY_GUEST" -H 'Content-Type: application/json' \
+  -d '{"query":"What services does Ejentic offer?","platform":"curl"}'
 #  X-Prompt-Tokens / X-Completion-Tokens / X-Total-Tokens / X-Gated / X-Saved-Tokens present
 
 # cross-tenant guard — MUST reject with HTTP 409 (proves isolation is enforced)
 curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8002/api/rag \
-  -H 'Content-Type: application/json' \
-  -d '{"query":"hi","clearance_level":"guest","client":"not-this-instance"}'
+  -H "X-API-Key: $RAG_KEY_GUEST" -H 'Content-Type: application/json' \
+  -d '{"query":"hi","client":"not-this-instance"}'
 
-# token dashboard
-curl -s http://localhost:8002/metrics | python3 -m json.tool
+# token dashboard — authenticated (leaks query text)
+curl -s -H "X-API-Key: $RAG_KEY_EXECUTIVE" http://localhost:8002/metrics | python3 -m json.tool
+```
+
+#### 3a. Prove the authentication boundary (the finding this build closes)
+
+```bash
+# no key -> 401 (auth is required and no honour-system fallback)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8002/api/rag \
+  -H 'Content-Type: application/json' -d '{"query":"hi"}'                       # 401
+
+# guest key asking for executive -> 403, loud (never a silent downgrade)
+curl -s -o /dev/null -w '%{http_code}\n' -X POST http://localhost:8002/api/rag \
+  -H "X-API-Key: $RAG_KEY_GUEST" -H 'Content-Type: application/json' \
+  -d '{"query":"What was Q2 revenue?","clearance_level":"executive"}'          # 403
+
+# guest key, executive question -> answered from PUBLIC only, so the gate REFUSES
+curl -s -X POST http://localhost:8002/api/rag \
+  -H "X-API-Key: $RAG_KEY_GUEST" -H 'Content-Type: application/json' \
+  -d '{"query":"What was Q2 revenue?"}'                    # escalation line, no $2.4M
+
+# executive key, same question -> ANSWERED (proves retrieval still works)
+curl -s -X POST http://localhost:8002/api/rag \
+  -H "X-API-Key: $RAG_KEY_EXECUTIVE" -H 'Content-Type: application/json' \
+  -d '{"query":"What was Q2 revenue?"}'                    # grounded answer with [Source N]
+
+# executive key NARROWING to guest -> allowed, answers only public material
+curl -s -X POST http://localhost:8002/api/rag \
+  -H "X-API-Key: $RAG_KEY_EXECUTIVE" -H 'Content-Type: application/json' \
+  -d '{"query":"What was Q2 revenue?","clearance_level":"guest"}'   # refused, like a guest
 ```
 
 ### 4. End-to-end through the SDK (server running)
@@ -200,14 +295,18 @@ node --experimental-strip-types examples/usage.ts   # or: npm link + run in a TS
 ### 5. UI (optional)
 
 ```bash
-cd frontend && npm install && npm run dev    # open http://localhost:3002
-# the top-right clearance selector changes what the backend is allowed to answer
+cd frontend
+cp .env.example .env.local     # set RAG_API_KEY (server-side only, never NEXT_PUBLIC_)
+npm install && npm run dev     # open http://localhost:3002
+# the header shows the clearance the UI's key grants — it no longer offers a dropdown,
+# because the key (held server-side by the /api/rag proxy) is what decides the role.
 ```
 
-Any failing step above should correspond to a real bug: clearances that leak
-(fail-closed check), an unknown `RAG_CLIENT` accepted instead of refused
-(step 1a), a drift from the frozen API contracts (SDK tests), or a silent
-cross-tenant request (step 3, 409).
+Any failing step above should correspond to a real bug: an unauthenticated call
+answered instead of `401`ing (step 3a), a widened clearance served instead of
+`403` (step 3a), clearances that leak (fail-closed check), an unknown `RAG_CLIENT`
+accepted instead of refused (step 1b), a drift from the frozen API contracts (SDK
+tests), or a silent cross-tenant request (step 3, 409).
 
 ---
 

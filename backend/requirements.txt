@@ -1,26 +1,40 @@
+# Pinned to the exact versions this backend is known to run on.
+#
+# WHY PINNED: 14 of these 15 packages used to be unpinned, so a fresh
+# `pip install -r requirements.txt` resolved to whatever was newest that day. A
+# single llama-index release can rename an import or change a postprocessor
+# signature and break this build with ZERO code changes on our side — the worst
+# kind of failure, because nothing in git explains it. Versions below are what
+# the working venv actually has (`pip freeze`, verified 2026-09-05).
+#
+# To upgrade deliberately: bump one line, run `venv/bin/python tests/run_all.py`
+# and a live smoke test, then commit the bump on its own.
+
 # ---- Web server ----
-fastapi
-uvicorn
-python-multipart          # required by FastAPI for /upload (multipart form data)
+fastapi==0.141.1
+uvicorn==0.52.0
+python-multipart==0.0.32   # required by FastAPI for /upload (multipart form data)
 
 # ---- Config ----
-python-dotenv
+python-dotenv==1.2.2
 
 # ---- Audit log (database.py) ----
-sqlalchemy                # async ORM used by database.py  (was missing -> import crash)
-aiosqlite                 # async SQLite driver for  sqlite+aiosqlite://  (was missing)
+SQLAlchemy==2.0.51        # async ORM used by database.py  (was missing -> import crash)
+aiosqlite==0.22.1         # async SQLite driver for  sqlite+aiosqlite://  (was missing)
 
 # ---- RAG core: LlamaIndex + NVIDIA NIM + Pinecone ----
-llama-index
-llama-index-vector-stores-pinecone
-llama-index-llms-nvidia
-llama-index-embeddings-nvidia
-llama-index-postprocessor-nvidia-rerank   # OPTIONAL NVIDIA NIM reranker (public SaaS EOL'd 2026-05-18; used only when RERANK_TRY_NVIDIA=true, e.g. self-hosted NIM)
+# Keep these five in lockstep: llama-index-core pins a compatible range for each
+# integration package, so bumping one alone is how you get an import error.
+llama-index==0.14.23
+llama-index-vector-stores-pinecone==0.8.0
+llama-index-llms-nvidia==0.5.1
+llama-index-embeddings-nvidia==0.5.1
+llama-index-postprocessor-nvidia-rerank==0.6.0   # OPTIONAL NVIDIA NIM reranker (public SaaS EOL'd 2026-05-18; used only when RERANK_TRY_NVIDIA=true, e.g. self-hosted NIM)
 
 # ---- Ingestion helpers ----
-beautifulsoup4
-requests
-pypdf
+beautifulsoup4==4.15.0
+requests==2.34.2
+pypdf==6.14.2
 
 # ---- Reranking: local cross-encoder (the primary, real reranker) ----
 # NVIDIA's hosted reranker reached end-of-life (HTTP 410 Gone) on 2026-05-18, so
@@ -28,9 +42,16 @@ pypdf
 # cross-encoder/ms-marco-MiniLM-L-6-v2 rerank ($0/query, offline, never retired).
 # Pulls in torch (a few hundred MB). If omitted, the pipeline still degrades to a
 # dependency-free BM25 lexical reranker — correct, just less semantically precise.
-# Pinned <4: sentence-transformers 4/5/6 hard-require torch>=2.5, which has NO
-# x86_64-macOS wheel (capped at 2.2.2). The 3.x line runs on BOTH the Linux deploy
-# (torch 2.5+) and Intel-mac dev. On Intel mac also pin `numpy<2` (torch 2.2.2 was
-# built against NumPy 1.x); Linux with torch 2.5+ is fine with NumPy 2.
-sentence-transformers>=3.0,<4
-pypdf>=4.0
+# Pinned to the 3.x line: sentence-transformers 4/5/6 hard-require torch>=2.5,
+# which has NO x86_64-macOS wheel (capped at 2.2.2). 3.x runs on BOTH the Linux
+# deploy (torch 2.5+) and Intel-mac dev.
+sentence-transformers==3.4.1
+
+# ---- torch / numpy: platform-split, and the split is load-bearing ----
+# Intel mac (x86_64-darwin) tops out at torch 2.2.2, which was BUILT against
+# NumPy 1.x — pairing it with NumPy 2 raises "_ARRAY_API not found" at import.
+# Linux can take a modern torch and is fine with NumPy 2. These markers let ONE
+# requirements file install correctly on both instead of needing a second file.
+torch==2.2.2;   sys_platform == "darwin" and platform_machine == "x86_64"
+numpy==1.26.4;  sys_platform == "darwin" and platform_machine == "x86_64"
+torch>=2.5;     not (sys_platform == "darwin" and platform_machine == "x86_64")

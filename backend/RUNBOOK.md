@@ -28,6 +28,48 @@ tag is attached, so ingestion is security-critical.
 
 ---
 
+## 0a. Authentication keys (once per deployment) — the security boundary
+
+The clearance filter only means something if the caller can't just *declare*
+their own clearance. The server now reads the role **from an API key**, so before
+serving real people you generate one key per role and set `auth.required: true`.
+
+Generate three different keys and paste each into `backend/.env`:
+
+```bash
+openssl rand -hex 32     # run once per role — each value must be different
+```
+
+```
+RAG_KEY_GUEST=<first value>
+RAG_KEY_EMPLOYEE=<second value>
+RAG_KEY_EXECUTIVE=<third value>
+```
+
+Then flip auth on in the client config (`backend/clients/<id>.json`):
+
+```json
+"auth": { "required": true, "admin_role": "executive" }
+```
+
+The config names the **variables**, never the values — the same rule as every
+other secret in this stack. A few things to know:
+
+- **Callers send the key** as `X-API-Key: <key>` (or `Authorization: Bearer <key>`).
+  The role is derived from it; `clearance_level` in the body can only *narrow* it.
+- **Fail-closed:** with `required: true` and none of the three keys set, the server
+  **refuses to boot** rather than quietly serve an open instance.
+- **Local dev:** leave `auth.required: false` and no keys — the pipeline runs open
+  on your machine, and `GET /` reports `"auth": false` so an unprotected instance
+  is never mistaken for a protected one.
+- **`/ingest` needs the admin key** (`admin_role`), and appends by default; a
+  destructive rebuild requires an explicit `{"rebuild": true}` in the body.
+
+> Never put a key in browser JavaScript — it's readable in devtools. The Next.js
+> UI keeps `RAG_API_KEY` in its own server-side proxy and adds it on the way out.
+
+---
+
 ## 1. Prepare the knowledge file
 
 The RAG's knowledge lives in a JSON array where each object has `text` and
@@ -135,16 +177,19 @@ venv/bin/python ingest_knowledge.py --file acme.json # a different client's file
 What it does, in order:
 1. **Validates** every record — refuses to run if any `text` is empty or any
    `clearance` is misspelled (a bad tag would make a document invisible).
-2. Creates the Pinecone index if missing (cosine metric, dimension 1024 to match
-   the `nv-embedqa-e5-v5` embedding model).
+2. Creates the Pinecone index if missing (cosine metric, dimension from the
+   client's `embed_dim` — 2048 for the default `nemotron-3-embed-1b` model).
 3. On a clean rebuild, **wipes the namespace first** so you don't mix old and new.
 4. Embeds each document via NVIDIA NIM and upserts it **with its clearance tag**.
 
-> **Why not `scrape_and_ingest.py` or `ingest_mock_data.py`?**
-> `scrape_and_ingest.py` ingests a plain text file with **no clearance tag** —
-> every chunk becomes invisible to non-executives. `ingest_mock_data.py` was an
-> earlier attempt (now fixed, but superseded). **`ingest_knowledge.py` is the one
-> canonical path.** `POST /ingest` on the running server also calls it.
+> **Why is there only one ingestion path?**
+> `scrape_and_ingest.py` used to exist but was **deleted** — it wrote chunks with
+> **no clearance tag** to a hardcoded namespace, so every chunk became invisible to
+> non-executives (the exact failure this pipeline guards against). `ingest_mock_data.py`
+> was an earlier attempt, now superseded. **`ingest_knowledge.py` is the one
+> canonical path** — it is the only script that writes to Pinecone, so there is
+> exactly one place the security-critical `clearance` tag is attached.
+> `POST /ingest` on the running server also calls it.
 
 ---
 
@@ -241,7 +286,8 @@ case-insensitively, so list the shortest unambiguous form of each fact.
 
 ## 4. Token accounting (the "measurable architecture")
 
-Every query records its token usage to the audit database (`ejentic_audit.db`),
+Every query records its token usage to the **per-tenant** audit database
+(`backend/data/<client>/audit.db`, and every row also carries its `client`),
 preferring the provider's authoritative count and falling back to a labelled
 estimate. Two ways to observe it:
 

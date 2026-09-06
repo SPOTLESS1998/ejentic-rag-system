@@ -17,16 +17,27 @@
       "parameters": {
         "method": "POST",
         "url": "http://backend:8002/api/rag",
+        "sendHeaders": true,
+        "specifyHeaders": "keypair",
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "X-API-Key",
+              "value": "={{$env.RAG_KEY_GUEST}}"
+            }
+          ]
+        },
         "sendBody": true,
         "specifyBody": "json",
-        "jsonBody": "={\n  \"query\": \"{{$json.body.message.text}}\",\n  \"clearance_level\": \"guest\",\n  \"platform\": \"n8n_Telegram\"\n}",
+        "jsonBody": "={\n  \"query\": \"{{$json.body.message.text}}\",\n  \"clearance_level\": \"\",\n  \"platform\": \"n8n_Telegram\"\n}",
         "options": {}
       },
       "id": "a3b35d4e-3c4d-6e5f-1a6b-7c8d9e0f1a2b",
       "name": "Ejentic FastAPI Brain",
       "type": "n8n-nodes-base.httpRequest",
       "typeVersion": 4,
-      "position": [ 600, 400 ]
+      "position": [ 600, 400 ],
+      "notes": "SETUP: this call now needs an API key. The backend reads the caller's clearance FROM THE KEY — a body field alone no longer grants anything, so without a key this node gets 401.\n\nSet RAG_KEY_GUEST in n8n's environment (the same value as backend/.env), or replace the $env expression with an n8n Header Auth credential, which keeps the key out of the exported workflow JSON.\n\nA public Telegram bot should carry the GUEST key: anyone who can message the bot inherits whatever that key grants. Never put the executive key here.\n\nclearance_level is deliberately \"\" — it means 'everything my key grants'. It can only ever NARROW (403 if it asks for more), so it is not where access is decided."
     },
     {
       "parameters": {
