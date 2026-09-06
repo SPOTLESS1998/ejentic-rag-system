@@ -100,9 +100,11 @@ HEALTH=$(curl -s "$URL/")
 check "GET / responds" "$([ -n "$HEALTH" ] && echo 0 || echo 1)"
 echo "$HEALTH" | python3 -c 'import sys,json
 h=json.load(sys.stdin)
-print(f"     client={h.get(\"client\")} index={h.get(\"index\")} reranker={h.get(\"reranker\")}")
+print("     client={} index={} reranker={}".format(
+    h.get("client"), h.get("index"), h.get("reranker")))
 a=h.get("auth") or {}
-print(f"     auth.required={a.get(\"required\")} roles_with_keys={a.get(\"roles_with_keys_set\")}")' || true
+print("     auth.required={} roles_with_keys={}".format(
+    a.get("required"), a.get("roles_with_keys_set")))' || true
 
 AUTH_ON=$(echo "$HEALTH" | python3 -c 'import sys,json
 print("1" if (json.load(sys.stdin).get("auth") or {}).get("required") else "0")' 2>/dev/null || echo 0)
@@ -324,8 +326,13 @@ except Exception: exit(1)' && echo 0 || echo 1)"
 echo "$METRICS" | python3 -c 'import sys,json
 try:
     d=json.load(sys.stdin); t=d["totals"]
-    print(f"     client={d.get(\"client\")} queries={t[\"queries\"]} answered={t[\"answered\"]} "
-          f"gated={t[\"gated\"]} total_tokens={t[\"total_tokens\"]} saved={t[\"estimated_saved_tokens\"]}")
+    # Plain .format(), not an f-string: this Python is embedded in a single-quoted
+    # shell heredoc, so nesting double quotes inside f-string braces needs escapes
+    # that Python 3.11 rejects outright ("unexpected character after line
+    # continuation character"). Positional args keep every quote unescaped.
+    print("     client={} queries={} answered={} gated={} total_tokens={} saved={}".format(
+        d.get("client"), t["queries"], t["answered"],
+        t["gated"], t["total_tokens"], t["estimated_saved_tokens"]))
 except Exception as e: print("     (could not parse metrics)", e)' || true
 
 # ---------------------------------------------------------------------------
