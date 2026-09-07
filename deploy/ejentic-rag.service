@@ -1,0 +1,43 @@
+[Unit]
+Description=Ejentic Enterprise RAG (FastAPI backend + Next.js UI, via Docker Compose)
+# Compose needs the Docker daemon up, and both need the network. Without the
+# docker.service dependency this races on boot and fails on a reboot only —
+# the worst kind of failure, because it works every time you test it by hand.
+Requires=docker.service
+After=docker.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+# Where the repo is checked out on the server. Change if you clone elsewhere.
+WorkingDirectory=/opt/ejentic-rag
+
+# The tenant's secrets, root-owned and 0600, deliberately OUTSIDE the git checkout
+# so `git clean` cannot delete them and `git add -A` cannot commit them. Compose
+# needs these two in its OWN environment to interpolate ${RAG_UI_KEY} and
+# ${RAG_CORS_ORIGINS}; the backend container gets the whole file via env_file.
+# Create it with deploy/server.env.example as the template — see deploy/GO_LIVE.md.
+EnvironmentFile=/etc/ejentic-rag/server.env
+
+# Foreground (`up`, not `up -d`) so systemd tracks the real process and Restart=
+# means something. `--remove-orphans` cleans up the dev-only n8n container if this
+# box ever ran the dev compose file.
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml up --remove-orphans
+ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml down
+
+# Pull/build before starting, so `systemctl restart` after a `git pull` actually
+# runs the new code. Leaving this out is how a box ends up serving a stale build —
+# which already happened once in this project, for 25 hours.
+ExecStartPre=/usr/bin/docker compose -f docker-compose.prod.yml build
+
+# An LLM container plus a first-boot model download is not fast. Give it room
+# rather than having systemd kill a healthy slow start.
+TimeoutStartSec=900
+TimeoutStopSec=120
+
+# Restart on crash AND on reboot — this is the "works with a dead laptop" part.
+Restart=always
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

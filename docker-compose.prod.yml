@@ -1,0 +1,97 @@
+# Deployment compose file for the RAG. Run the dev one (docker-compose.yml) for
+# local work; this one is for a box that strangers can reach.
+#
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# `version:` is deliberately absent — it has been ignored since Compose v2 and only
+# produces a deprecation warning now.
+#
+# WHAT THIS FILE CHANGES, AND WHY EACH ONE MATTERS
+# -----------------------------------------------
+#  1. The backend publishes NO port. It is reachable only by the frontend, over the
+#     internal compose network. The dev file has `8002:8002`, which puts the API on
+#     the public interface next to the UI. Auth still holds there — this is not a
+#     hole — but it widens the surface for no benefit and makes a mistyped
+#     CORS_ORIGINS suddenly load-bearing.
+#  2. The frontend publishes to 127.0.0.1 ONLY. Caddy on the same box is the single
+#     path in from the internet, terminating TLS. Same shape as the lead-gen
+#     approval server (see deploy/Caddyfile.rag).
+#  3. No source bind-mounts. The dev file mounts ./backend and ./frontend into the
+#     containers, so the running code is whatever is on the host disk. That is the
+#     exact trap that already cost this project a day, when a stale checkout served
+#     :8002 for 25 hours while the fixed code sat unused on disk.
+#  4. RAG_BACKEND_URL, not NEXT_PUBLIC_BACKEND_URL. The proxy prefers the former and
+#     only falls back to the latter; more to the point, NEXT_PUBLIC_ is the exact
+#     mechanism that inlines a value into the browser bundle. Leaving that variable
+#     in a deployment file is an invitation for someone to add the KEY beside it the
+#     same way.
+#  5. No n8n. The dev file publishes the n8n editor on 5678 with no authentication —
+#     fine on a laptop, an unauthenticated admin UI on a public box. The Telegram
+#     flow does not need to live here: point n8n (wherever it runs) at the deployed
+#     HTTPS hostname with its own key.
+#
+# SECRETS
+# -------
+# Nothing secret is in this file or anywhere in the repo. The backend reads them
+# from /etc/ejentic-rag/server.env (root-owned, 0600, created on the server — see
+# deploy/GO_LIVE.md). The frontend gets exactly ONE key, RAG_UI_KEY, rather than the
+# whole file: it authenticates at one clearance and has no business holding the
+# executive key. The `:?` form means Compose REFUSES to start if it is unset, which
+# matches the backend's own fail-closed boot rather than quietly serving an
+# unauthenticated UI.
+
+services:
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    # All of the tenant's secrets and tuning. Absolute path: the secret file lives
+    # OUTSIDE the git checkout, so a `git clean` or a fresh clone cannot destroy it
+    # and a stray `git add -A` cannot commit it.
+    env_file:
+      # Overridable ONLY so the file can be validated without root
+      # (`RAG_SERVER_ENV=./deploy/server.env.example docker compose -f
+      # docker-compose.prod.yml config`). On the server, leave it at the default.
+      - ${RAG_SERVER_ENV:-/etc/ejentic-rag/server.env}
+    environment:
+      # Which browser origins may call the backend directly. With the proxy in
+      # front, browsers do not call it at all — this stays tight as defence in
+      # depth, since the backend sets allow_credentials=True.
+      CORS_ORIGINS: ${RAG_CORS_ORIGINS:?set RAG_CORS_ORIGINS to your https origin, e.g. https://rag.example.com}
+    volumes:
+      # Audit DB, uploads, and the cached cross-encoder weights. A named volume, so
+      # `docker compose down` does not take the audit trail with it.
+      - rag_data:/app/data
+    restart: unless-stopped
+    # Sane defaults for a shared box; raise if the reranker gets starved.
+    deploy:
+      resources:
+        limits:
+          memory: 4G
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    # Loopback only. Caddy is the only thing that reaches this, over 443.
+    ports:
+      - "127.0.0.1:3002:3002"
+    environment:
+      # Service name on the compose network, not localhost — inside a container,
+      # localhost is the container itself.
+      RAG_BACKEND_URL: http://backend:8002
+      # DECISION 2 lives here: the clearance every visitor to this deployment gets.
+      # One deployed UI holds one key, so it answers at exactly one tier for
+      # everyone who opens it. Guest unless you have deliberately decided otherwise
+      # — see deploy/GO_LIVE.md.
+      RAG_API_KEY: ${RAG_UI_KEY:?set RAG_UI_KEY to the key this UI should authenticate with (guest unless you decided otherwise)}
+    depends_on:
+      backend:
+        # Wait for the backend to answer, not merely to exist. First boot can take
+        # minutes while the cross-encoder downloads, and a frontend that starts
+        # early just serves errors to whoever is watching.
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  rag_data:

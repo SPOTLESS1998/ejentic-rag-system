@@ -140,6 +140,36 @@ Health check: `GET http://localhost:8002/` → `{"status":"ok", "client":"ejenti
 "auth": {"required": false, ...}, "token_metering": true, ...}` — the `auth` block
 tells you at a glance whether the instance is protected.
 
+## Deployment
+
+`docker-compose.yml` is the **development** setup: it bind-mounts the source, publishes
+the backend on `8002`, runs the UI via `next dev`, and includes an unauthenticated n8n
+editor. All four are right for a laptop and wrong for a public hostname.
+
+For a deployment use the separate files, which change exactly those things:
+
+| | |
+|---|---|
+| **[`deploy/GO_LIVE.md`](deploy/GO_LIVE.md)** | **start here** — the runbook: decisions, key generation, the verification matrix, rotation, rollback |
+| [`DEPLOYMENT-PLAN.md`](DEPLOYMENT-PLAN.md) | *why* each of those choices exists, and the five things that were wrong for a deployment |
+| `docker-compose.prod.yml` | backend on the internal network only, UI on `127.0.0.1` behind Caddy, no source mounts |
+| `deploy/Caddyfile.rag` | TLS + password gate; the only path in from the internet |
+| `deploy/ejentic-rag.service` | systemd, rebuilds on restart, survives reboot |
+
+```bash
+docker compose -f docker-compose.prod.yml up -d --build   # after reading GO_LIVE.md
+```
+
+Two things worth knowing before you start:
+
+- **Secrets never enter an image.** `backend/.dockerignore` and `frontend/.dockerignore` are
+  load-bearing, not housekeeping: both Dockerfiles end in `COPY . .`, so without them a build
+  bakes every `RAG_KEY_*` into an image layer, where `docker history` reads it straight back
+  out. Runtime env only, from `/etc/ejentic-rag/server.env` — outside the git checkout.
+- **One deployed UI answers at one clearance,** for everyone who opens it. There is no
+  "log in and see more" without per-user login. Decide that deliberately — it is Decision 2
+  in the runbook, and it is the one that actually matters.
+
 ## Multi-tenancy: one engine, every client
 
 A RAG instance boots for **one active tenant** (`RAG_CLIENT` env → a file in

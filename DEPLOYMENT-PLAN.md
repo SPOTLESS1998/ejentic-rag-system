@@ -1,10 +1,39 @@
 # Deploying the RAG — the plan, and what has to be decided first
 
 Written 2026-09-06, after the auth work landed and was live-verified on localhost.
+**Updated 2026-09-07: the artifacts in "What I would change before deploying anything" are now
+built** — see the status box below. The three decisions are still open, and nothing has been
+deployed.
 
-This is a **plan, not a runbook**. Nothing here has been executed. It exists so the decisions get
-made before anything is stood up, because two of them cost money and one of them cannot be undone
-quietly.
+> ## Status — 2026-09-07
+>
+> **Built and verified locally (steps 2 of the sequence). Nothing live, nothing deployed.**
+>
+> | File | What it is |
+> |---|---|
+> | `backend/.dockerignore`, `frontend/.dockerignore` | **The important one** — see finding 4 below |
+> | `docker-compose.prod.yml` | backend internal-only, loopback-published UI, no source mounts |
+> | `backend/Dockerfile.prod` | non-root, no build toolchain at runtime, `libgomp1` for torch |
+> | `frontend/Dockerfile.prod` | real production build (`output: standalone`), not `next dev` |
+> | `frontend/next.config.ts` | `output: "standalone"` added |
+> | `deploy/Caddyfile.rag` | site block, password-gated by default, SSE-safe |
+> | `deploy/ejentic-rag.service` | systemd unit, rebuilds on restart, survives reboot |
+> | `deploy/server.env.example` | template for the server's secret file (names only) |
+> | `deploy/GO_LIVE.md` | the runbook — decisions, key generation, the verification matrix |
+>
+> Verified: `docker compose -f docker-compose.prod.yml config` resolves clean, and the resolved
+> config confirms the backend publishes no port, the UI binds `127.0.0.1` only, there are no bind
+> mounts, and n8n is absent. The missing-variable guards fail loudly (`exit 1`) rather than starting
+> an unauthenticated UI. `npm run build` succeeds with `output: standalone`, and the key is absent
+> from **every** file under `.next/` — leak check proven able to fail first, by planting a decoy key
+> of the same shape and confirming it gets caught.
+>
+> **Not verified:** the Docker images do not build on this Mac — the Docker daemon is not running,
+> only the CLI. So the `.dockerignore` files are verified by pattern coverage against the real file
+> list, not against a real build context. `GO_LIVE.md` step 4 carries a one-command check that
+> proves it against the actual image at deploy time; run it, do not skip it.
+>
+> **Still yours to decide:** Decisions 1, 2 and 3 below. Decision 2 is the one that matters.
 
 ---
 
@@ -25,10 +54,10 @@ laptop, without weakening any of the above.**
 
 ---
 
-## Three things that are wrong for a deployment right now
+## Five things that are wrong for a deployment right now
 
-These are not blockers to plan around — they are small, and they are the reason to plan before
-running anything.
+Findings 1–3 were written on 2026-09-06. **Findings 4 and 5 were found on 2026-09-07 while building
+the artifacts, and finding 4 is worse than anything else on this list.**
 
 ### 1. `docker-compose.yml` predates the auth work
 
@@ -65,6 +94,43 @@ checkout served :8002 for 25 hours.
 This is correct behaviour, not a bug, and it is worth knowing in advance: **the container will refuse
 to start** if the key env vars are not present. That is the fail-closed design working. It will look
 like a broken deploy the first time it happens.
+
+### 4. ⚠️ There was no `.dockerignore`, so `docker build` baked every key into the image
+
+**This is the finding that would have undone the entire auth project, and it was not in the original
+plan.** Both Dockerfiles end with `COPY . .`. `backend/.env` exists on disk and holds
+`PINECONE_API_KEY`, `NVIDIA_API_KEY` and all three `RAG_KEY_*` values. With no `.dockerignore`, every
+one of those lands in an image layer.
+
+Why that is worse than it sounds: an image layer is a **distributable artifact**. Anyone who can pull
+the image — a registry, a teammate, a client you hand a build to — can read the values straight back
+out with `docker history` or by extracting the layer. Passing `--env-file` at `docker run` does not
+help, because the secret is already *in* the image. And the file would look completely fine: the
+deployment works, auth works, every check in README §3a passes. The keys are simply also sitting in
+the build output.
+
+`RAG_KEY_EXECUTIVE` *is* the security boundary this whole system was rebuilt around. A boundary that
+ships inside the artifact is not one.
+
+Fixed: `backend/.dockerignore` and `frontend/.dockerignore`, which exclude `.env*` (keeping
+`.env.example`), plus `data/`, `*.db`, `venv/`, `node_modules/` and `.next/`. `GO_LIVE.md` step 4
+carries a one-command check against the built image, because pattern coverage on a laptop is not the
+same as proof against a real build context.
+
+### 5. The frontend Dockerfile runs `npm run dev`
+
+```dockerfile
+CMD ["npm", "run", "dev", "--", "-p", "3002"]
+```
+
+That is the Next.js development server: it compiles routes on demand, ships unminified code, and is
+explicitly not built to face real traffic. Correct for a laptop, wrong for anything with a public
+hostname.
+
+Fixed in `frontend/Dockerfile.prod`: a multi-stage build using `output: "standalone"` (the documented
+Docker path for this Next version), running `node server.js` as a non-root user. The dev Dockerfile
+is left exactly as it was — the two want opposite things, and sharing one file means one of them is
+always slightly wrong.
 
 ---
 

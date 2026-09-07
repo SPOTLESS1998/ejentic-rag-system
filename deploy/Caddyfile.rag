@@ -1,0 +1,102 @@
+# ── Ejentic Enterprise RAG — Caddy site block ───────────────────────────────
+# REFERENCE COPY. Nothing here is live yet.
+#
+# Same pattern as deploy/Caddyfile.audit in lead-generation-system, which has been
+# serving audit.ejentic.xyz since 2026-09-05. Paste this block into the SERVER's
+# /etc/caddy/Caddyfile. That server file is THE single source of truth for every
+# hostname on the box — never let a script overwrite it, or one deploy takes the
+# other sites down with it.
+#
+# ── REPLACE BEFORE USE ─────────────────────────────────────────────────────
+#   rag.example.com            -> the real hostname (e.g. rag.<yourdomain>)
+#   REPLACE_WITH_BCRYPT_HASH   -> output of `caddy hash-password`, generated ON
+#                                 THE SERVER and never committed here
+# The hostname is left as a placeholder on purpose: this system is multi-tenant and
+# redeployable, so no client's domain belongs in the repo.
+#
+# Caddy provisions a real Let's Encrypt certificate automatically once
+#
+#     rag.example.com   A   <server-ip>
+#
+# resolves. Nothing to do about TLS beyond pointing DNS at the box first — if the
+# name does not resolve yet, Caddy retries and the site 502s in the meantime.
+#
+# ⚠️ THE DIRECTIVE NAME DEPENDS ON THE CADDY VERSION (learned the hard way on the
+#    lead-gen deploy, carried forward here so it is not learned twice):
+#        Caddy  < 2.8  ->  basicauth   (ONE word)
+#        Caddy >= 2.8  ->  basic_auth  (TWO words)
+#    The box running audit.ejentic.xyz is on 2.6.2, so this file uses `basicauth`.
+#    The wrong one fails at config-parse time. Check first, then ALWAYS validate
+#    before reloading, so a bad edit can never take the main site down with it:
+#
+#        caddy version
+#        sudo caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile
+#        sudo systemctl reload caddy      # reload, never restart
+#
+# ── WHY THE WHOLE SITE IS PASSWORD-GATED BY DEFAULT ────────────────────────
+# This is DECISION 3 in DEPLOYMENT-PLAN.md, and gated is the default because it is
+# the reversible one. A password in front proves the hosting works without
+# publishing a demo nobody has decided to publish; taking the gate off later is one
+# line. Publishing first and discovering you did not mean to is not.
+#
+# Note what the gate does NOT protect: clearance. The UI holds ONE key and answers
+# at ONE tier for everyone who gets past the password (DECISION 2). Basic auth
+# controls WHO reaches the page; the key controls WHAT the page can see. Do not let
+# the password create a false sense that staff are seeing more than guests — they
+# are not, unless a second deployment holds a different key.
+
+rag.example.com {
+	encode gzip
+
+	# ── EVERYTHING IS PRIVATE ────────────────────────────────────────────────
+	# The UI at / and its server-side proxy routes at /api/rag/* are one unit: the
+	# browser calls the proxy from the page, same-origin, so the basic-auth
+	# credentials it already holds are sent automatically. Gating the whole site
+	# needs no exceptions and leaves no accidentally-open route.
+	basicauth {
+		ejentic REPLACE_WITH_BCRYPT_HASH
+	}
+
+	# ── TO PUBLISH IT (only when Decision 3 is deliberate) ───────────────────
+	# Delete the basicauth block above. If you want a public UI but a private
+	# uptime check, add the bare public path FIRST and scope the gate:
+	#     @private not path /healthz
+	#     basicauth @private { ejentic REPLACE_WITH_BCRYPT_HASH }
+	# There is deliberately no public health route today. The lead-gen lesson
+	# applies: its /health looked like an uptime ping and actually rendered token
+	# spend and cost-per-lead, so it had to be made private after the fact. The
+	# RAG's equivalent, the backend's `GET /`, reports the auth posture and the
+	# index name — not secret, but not something to publish by reflex either, and
+	# it is not reachable from outside at all in this deployment.
+
+	# ── HEADERS ──────────────────────────────────────────────────────────────
+	header {
+		# One year, and only sensible once TLS is confirmed working — a wrong
+		# HSTS header is remembered by browsers and cannot be taken back quickly.
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		# This deployment is not meant to be embedded in anyone else's page.
+		X-Frame-Options "DENY"
+		# Don't advertise the server software.
+		-Server
+	}
+
+	# ── UPSTREAM ─────────────────────────────────────────────────────────────
+	# The Next.js frontend, published by docker-compose.prod.yml on 127.0.0.1:3002
+	# ONLY. The FastAPI backend is not proxied and publishes no port at all — the
+	# frontend reaches it over the internal compose network, and it is the only
+	# thing that can. So there is exactly one path in from the internet: this block.
+	reverse_proxy 127.0.0.1:3002 {
+		# The /chat route is a Server-Sent Events stream. Without flush_interval -1
+		# Caddy buffers it and the answer arrives in one lump at the end, which
+		# reads as a hang to whoever is waiting.
+		flush_interval -1
+		# An LLM answer can take a while; the backend's own LLM_TIMEOUT defaults to
+		# 300s, so the proxy must not give up first.
+		transport http {
+			response_header_timeout 330s
+			read_timeout 330s
+		}
+	}
+}

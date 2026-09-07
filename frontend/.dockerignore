@@ -1,0 +1,31 @@
+# What `docker build` must NEVER copy into an image layer.
+#
+# Same reasoning as backend/.dockerignore: the Dockerfile does `COPY . .`, and
+# `.env.local` is where RAG_API_KEY lives locally. An image layer is a
+# distributable artifact — a key baked into one is readable with `docker history`,
+# and no amount of runtime env-passing takes it back out.
+#
+# The UI's whole security property is that the browser never sees a key. That
+# property is worth exactly nothing if the key ships in the image instead.
+
+# --- Secrets -----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Rebuilt inside the image; copying them in wastes layers and can poison the
+# --- build with a host-built cache (wrong platform, stale routes).
+node_modules/
+.next/
+out/
+build/
+
+# --- Build/dev cruft ---------------------------------------------------------
+.git/
+.gitignore
+.DS_Store
+*.log
+npm-debug.log*
+coverage/

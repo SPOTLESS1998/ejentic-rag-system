@@ -1,0 +1,89 @@
+# Production image for the RAG backend.
+#
+# Kept separate from the dev Dockerfile rather than replacing it, because the two
+# want opposite things: dev bind-mounts the source and runs as root so it can write
+# anywhere; a deployment wants the code frozen at build time and the process
+# unprivileged. Sharing one file means one of the two is always slightly wrong.
+#
+# Differences from the dev image, and why each matters:
+#   • Non-root user. If the process is ever made to write somewhere it shouldn't,
+#     "cannot" is a better answer than "did".
+#   • Build toolchain dropped from the final image. build-essential is needed to
+#     compile some wheels; keeping the compiler in a running container just adds
+#     things an attacker can use.
+#   • /app/data pre-created and owned by the app user, so the named volume comes up
+#     writable. Docker seeds a fresh named volume from the image path — including
+#     ownership — so getting this wrong shows up as a permission error on the audit
+#     DB at first boot, which is a confusing way to learn it.
+#   • No .env. backend/.dockerignore excludes it; the keys arrive at runtime.
+
+# --- Stage 1: build the wheels ------------------------------------------------
+FROM python:3.11-slim AS builder
+WORKDIR /app
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends build-essential \
+ && rm -rf /var/lib/apt/lists/*
+COPY requirements.txt .
+# Install into a venv we can copy wholesale, so the compiler never reaches runtime.
+RUN python -m venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+
+# OPTIONAL, opt-in: install a CPU-only torch before the rest.
+#
+# On Linux, requirements.txt asks for `torch>=2.5`, and pip's default PyPI wheel for
+# that bundles the whole NVIDIA CUDA runtime — several GB of GPU libraries that a
+# CPU-only VPS will never execute. The reranker here is
+# cross-encoder/ms-marco-MiniLM-L-6-v2, a ~90 MB model running on CPU, so none of
+# that is used. Passing the CPU index cuts the image by roughly 2-3 GB:
+#
+#   docker compose -f docker-compose.prod.yml build \
+#     --build-arg TORCH_INDEX_URL=https://download.pytorch.org/whl/cpu
+#
+# Left OFF by default deliberately: the default path is the one that has actually
+# been installed and run in this project, and a deployment is the wrong place to
+# find out that a different wheel source resolves differently. Turn it on when disk
+# or image-pull time matters, and check `docker compose logs backend` for
+# "[rerank] Local sentence-transformers cross-encoder active" afterwards — if torch
+# came out broken, the pipeline degrades to the dependency-free reranker silently
+# rather than failing, which is exactly how this would go unnoticed.
+ARG TORCH_INDEX_URL=""
+RUN pip install --no-cache-dir --upgrade pip \
+ && if [ -n "$TORCH_INDEX_URL" ]; then \
+      pip install --no-cache-dir --index-url "$TORCH_INDEX_URL" torch; \
+    fi \
+ && pip install --no-cache-dir -r requirements.txt
+
+# --- Stage 2: runtime ---------------------------------------------------------
+FROM python:3.11-slim AS runner
+WORKDIR /app
+
+# libgomp1 is torch's OpenMP runtime — the local cross-encoder reranker imports
+# torch, and without this the container starts and then fails at first rerank with
+# a bare "libgomp.so.1: cannot open shared object file". Slim images do not have it.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends libgomp1 \
+ && rm -rf /var/lib/apt/lists/* \
+ && useradd --create-home --uid 10001 appuser
+
+COPY --from=builder /opt/venv /opt/venv
+ENV PATH="/opt/venv/bin:$PATH"
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONDONTWRITEBYTECODE=1
+# Where sentence-transformers caches model weights. Point it inside the data
+# volume so the reranker is downloaded once, not on every container restart.
+ENV HF_HOME=/app/data/.cache/huggingface
+
+COPY --chown=appuser:appuser . .
+# Owned by the app user so the named volume mounted here is writable (audit DB,
+# uploads, model cache).
+RUN mkdir -p /app/data && chown -R appuser:appuser /app/data
+
+USER appuser
+EXPOSE 8002
+
+# `GET /` is the public liveness endpoint (it reports the auth posture and leaks no
+# key). start-period is generous: first boot may download the cross-encoder.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=180s --retries=5 \
+  CMD python -c "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8002/',timeout=5).status==200 else 1)"
+
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8002"]

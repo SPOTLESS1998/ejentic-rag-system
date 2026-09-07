@@ -1,0 +1,58 @@
+# Production image for the RAG frontend.
+#
+# The dev Dockerfile next to this one runs `npm run dev`, which is correct for
+# local work and wrong for anything reachable from the internet: the dev server
+# compiles on demand, ships unminified code, and is explicitly not built to face
+# real traffic. This file builds once and serves the built output.
+#
+# Multi-stage on purpose — the build needs devDependencies and the whole source
+# tree; the runtime needs neither. Nothing from the build stage reaches the final
+# image except the standalone server and its static assets.
+
+# --- Stage 1: install dependencies -------------------------------------------
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package.json package-lock.json* ./
+# `npm ci` when there is a lockfile (reproducible), `npm install` when there
+# isn't. A production deploy should really have the lockfile committed.
+RUN if [ -f package-lock.json ]; then npm ci; else npm install; fi
+
+# --- Stage 2: build -----------------------------------------------------------
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY . .
+# Telemetry off: a build container phoning home is noise at best, and on a client
+# network it is a question nobody wants to have to answer.
+ENV NEXT_TELEMETRY_DISABLED=1
+# No build ARG carries a secret here, deliberately. RAG_API_KEY is read at REQUEST
+# time by src/lib/rag-proxy.ts, so it is supplied at `docker run`, never baked in.
+# If anyone ever adds a NEXT_PUBLIC_ variable for it, the value lands in the
+# JavaScript sent to the browser and the proxy stops being a boundary.
+RUN npm run build
+
+# --- Stage 3: runtime ---------------------------------------------------------
+FROM node:20-alpine AS runner
+WORKDIR /app
+ENV NODE_ENV=production
+ENV NEXT_TELEMETRY_DISABLED=1
+ENV PORT=3002
+ENV HOSTNAME=0.0.0.0
+
+# Run as a non-root user. Node's base image ships one (`node`, uid 1000); use it
+# rather than inventing another.
+# server.js does not serve these two on its own — copy them into the standalone
+# tree or the site loads with no CSS and no images.
+COPY --from=builder --chown=node:node /app/.next/standalone ./
+COPY --from=builder --chown=node:node /app/.next/static ./.next/static
+COPY --from=builder --chown=node:node /app/public ./public
+
+USER node
+EXPOSE 3002
+
+# Liveness for compose's healthcheck. Uses node's own fetch (Node 20) so the image
+# needs no curl or wget.
+HEALTHCHECK --interval=30s --timeout=5s --start-period=20s --retries=3 \
+  CMD node -e "fetch('http://127.0.0.1:3002/').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
+
+CMD ["node", "server.js"]

@@ -1,0 +1,45 @@
+# What `docker build` must NEVER copy into an image layer.
+#
+# This file is load-bearing, not housekeeping. The Dockerfile ends with `COPY . .`,
+# and `backend/.env` holds PINECONE_API_KEY, NVIDIA_API_KEY and all three
+# clearance keys. Without this file those values get baked into a layer, and an
+# image layer is a distributable artifact: anyone who can pull the image can read
+# them back out with `docker history` or by extracting the layer. Nothing about a
+# later `docker run --env-file` undoes it — the secret is already in the image.
+#
+# That would quietly defeat the entire point of the auth work. RAG_KEY_EXECUTIVE
+# *is* the security boundary; a boundary that ships inside the build output is not
+# one. Runtime env only: see docker-compose.prod.yml and deploy/GO_LIVE.md.
+
+# --- Secrets -----------------------------------------------------------------
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+
+# --- Local state that must not become image content -------------------------
+# Baking a dev audit.db in would ship one tenant's query history to every
+# deployment, and uploads/ can hold whatever anyone dropped on a local test.
+data/
+uploads/
+*.db
+*.sqlite
+*.sqlite3
+
+# --- Build/dev cruft ---------------------------------------------------------
+venv/
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+tests/__pycache__/
+
+# --- Not needed at runtime ---------------------------------------------------
+.git/
+.gitignore
+.DS_Store
+*.log
+eval_report.json
