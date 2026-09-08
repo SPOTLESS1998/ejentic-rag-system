@@ -24,6 +24,18 @@ INGEST                                RETRIEVE                        SYNTHESIZE
 | 3. Guardrails | Confidence gate, mandatory `[Source N]` citations, grounding-only persona | Hallucination refusal at ~0 answer tokens |
 | Observability | Token metering (provider or labelled estimate), SQLite audit DB, `GET /metrics`, LangSmith wiring | The system is *measurable*, so spend is provable |
 
+## The demo corpus is fabricated
+
+`backend/ejentic_knowledge.json` is a **test fixture, not company records.** Its `internal` and
+`executive` entries — an employee handbook, a "Project Delta", Q2 revenue figures, an authorised
+acquisition bid — are invented, and exist only so the clearance grid has something to gate.
+`backend/eval_cases.json` and `backend/verify_clearance.py` assert on those exact strings to prove
+that a `guest` answer never leaks an `executive` fact, which is why they read as oddly specific.
+
+To be explicit, because the numbers look real: **they are not Ejentic AI's financials.** Nothing in
+that file describes any real company's revenue, projects, or strategy. Replace it wholesale with
+your own clearance-tagged content before running this against anything that matters.
+
 ## Why this is the "shared architecture"
 
 Every Ejentic system we build needs retrieval augmentation. Instead of each
