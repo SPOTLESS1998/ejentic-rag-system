@@ -24,19 +24,19 @@
         "clearance": "public"
     },
     {
-        "text": "Ejentic AI Employee Handbook: Core Hours are 10:00 AM to 3:00 PM EST. All employees are required to use 1Password for credential management. The corporate VPN must be active when accessing staging environments.",
+        "text": "SAMPLE DEMO DATA (fictional): Ejentic AI Employee Handbook: Core Hours are 10:00 AM to 3:00 PM EST. All employees are required to use 1Password for credential management. The corporate VPN must be active when accessing staging environments.",
         "clearance": "internal"
     },
     {
-        "text": "Internal Project Delta: Ejentic AI is currently developing a secret project named Delta, which aims to create a fully autonomous coding agent capable of resolving 50% of GitHub issues without human intervention. ETA for beta release is Q4 2026.",
+        "text": "SAMPLE DEMO DATA (fictional): Internal Project Delta: Ejentic AI is currently developing a secret project named Delta, which aims to create a fully autonomous coding agent capable of resolving 50% of GitHub issues without human intervention. ETA for beta release is Q4 2026.",
         "clearance": "internal"
     },
     {
-        "text": "Executive Financial Data Q2: The Ejentic AI Knowledge Core generated $2.4M in recurring revenue. The total operating expenses for cloud infrastructure were $310k. We are projecting a 40% growth in Q3 due to the new NVIDIA partnership.",
+        "text": "SAMPLE DEMO DATA (fictional): Executive Financial Data Q2: The Ejentic AI Knowledge Core generated $2.4M in recurring revenue. The total operating expenses for cloud infrastructure were $310k. We are projecting a 40% growth in Q3 due to the new NVIDIA partnership.",
         "clearance": "executive"
     },
     {
-        "text": "Executive Strategy 2027: The executive board has approved a potential acquisition target, 'OmniScrape Solutions', to bolster our data ingestion capabilities using Firecrawl. The maximum bid authorized is $12M.",
+        "text": "SAMPLE DEMO DATA (fictional): Executive Strategy 2027: The executive board has approved a potential acquisition target, 'OmniScrape Solutions', to bolster our data ingestion capabilities using Firecrawl. The maximum bid authorized is $12M.",
         "clearance": "executive"
     }
 ]
