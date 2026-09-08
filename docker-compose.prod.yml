@@ -29,6 +29,11 @@
 #     fine on a laptop, an unauthenticated admin UI on a public box. The Telegram
 #     flow does not need to live here: point n8n (wherever it runs) at the deployed
 #     HTTPS hostname with its own key.
+#  6. An OPTIONAL internal (staff) deployment, behind a compose profile. `up -d` starts
+#     the public UI only, exactly as it did before this existed; `--profile internal
+#     up -d` adds a second UI on 127.0.0.1:3003 that authenticates individual people
+#     and acts at each person's own tier. Same image, different environment — see the
+#     frontend-internal service at the bottom of this file.
 #
 # SECRETS
 # -------
@@ -39,6 +44,12 @@
 # executive key. The `:?` form means Compose REFUSES to start if it is unset, which
 # matches the backend's own fail-closed boot rather than quietly serving an
 # unauthenticated UI.
+#
+# The internal frontend reads WHO may sign in, their access codes, and the session
+# signing secret from a SECOND file, /etc/ejentic-rag/internal.env. Two files because
+# they have two different jobs: that container talks only to our own backend, so
+# handing it the Pinecone and NVIDIA keys would be giving an internet-adjacent process
+# credentials it cannot legitimately use. See deploy/internal.env.example.
 
 services:
   backend:
@@ -90,6 +101,70 @@ services:
         # Wait for the backend to answer, not merely to exist. First boot can take
         # minutes while the cross-encoder downloads, and a frontend that starts
         # early just serves errors to whoever is watching.
+        condition: service_healthy
+    restart: unless-stopped
+
+  # ── THE INTERNAL (STAFF) DEPLOYMENT ──────────────────────────────────────────
+  # This is the answer to DECISION 2's "what if staff need the internal tier".
+  #
+  # It is OPT-IN via a compose profile, so it does not start unless asked for:
+  #
+  #     docker compose -f docker-compose.prod.yml up -d                      # public only
+  #     docker compose -f docker-compose.prod.yml --profile internal up -d    # both
+  #
+  # That default matters. `up -d` with no profile brings up exactly what it brought up
+  # before this service existed — the public UI holding one guest key. Nothing about
+  # the internet-facing surface changes by adding a staff tier beside it.
+  #
+  # WHY A SECOND CONTAINER RATHER THAN ONE UI THAT SHOWS MORE AFTER LOGIN
+  # --------------------------------------------------------------------
+  # It IS the same image and the same code — the difference is entirely environment.
+  # The hinge is RAG_STAFF: unset, the code runs in single-key mode exactly as the
+  # public deployment does; set, it requires a signed session per request and picks the
+  # backend key from the signed-in person's tier.
+  #
+  # Running it as a separate container keeps the two credential sets in separate
+  # processes. The public container never holds the employee or executive key at all,
+  # so a compromise of the internet-facing surface yields the guest key and nothing
+  # more. One container serving both audiences would have to hold every key, which
+  # throws that property away for no gain — they share the expensive part (the backend)
+  # either way.
+  frontend-internal:
+    profiles: ["internal"]
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.prod
+    # A DIFFERENT loopback port from the public UI, with its own Caddy block on its own
+    # hostname. Container-internal it is still 3002; only the host port differs.
+    ports:
+      - "127.0.0.1:3003:3002"
+    # WHO may sign in, their access codes, and the session signing secret. A separate
+    # file from server.env on purpose: this container has no business holding the
+    # Pinecone or NVIDIA keys, and server.env is full of them.
+    env_file:
+      # Overridable only so the file can be validated without root — on the server,
+      # leave it at the default. See deploy/internal.env.example.
+      - ${RAG_INTERNAL_ENV:-/etc/ejentic-rag/internal.env}
+    environment:
+      RAG_BACKEND_URL: http://backend:8002
+      # The role keys, passed through from the shell (the runbook sources server.env
+      # before running compose). Deliberately NOT copied into internal.env: a key that
+      # lives in two files gets rotated in one of them, and the symptom is a UI that
+      # loads fine and 401s on every question.
+      #
+      # `:-` not `:?` — which tiers this deployment actually staffs is a per-deployment
+      # choice, so requiring all three here would be wrong. A person configured for a
+      # tier whose key is absent is refused at sign-in and listed in /whoami's
+      # `staff_problems`; the fail-closed check lives in the code, where it can see
+      # which roles were actually staffed.
+      RAG_KEY_GUEST: ${RAG_KEY_GUEST:-}
+      RAG_KEY_EMPLOYEE: ${RAG_KEY_EMPLOYEE:-}
+      RAG_KEY_EXECUTIVE: ${RAG_KEY_EXECUTIVE:-}
+      # NOTE: RAG_API_KEY is deliberately absent. With RAG_STAFF set it would be
+      # ignored anyway, and leaving it unset means a mistake in RAG_STAFF cannot
+      # silently fall back to serving everyone at one tier with no sign-in.
+    depends_on:
+      backend:
         condition: service_healthy
     restart: unless-stopped
 

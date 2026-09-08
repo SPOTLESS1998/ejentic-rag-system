@@ -8,7 +8,10 @@
 # other sites down with it.
 #
 # ── REPLACE BEFORE USE ─────────────────────────────────────────────────────
-#   rag.example.com            -> the real hostname (e.g. rag.<yourdomain>)
+#   rag.example.com            -> the real PUBLIC hostname (e.g. rag.<yourdomain>)
+#   rag-internal.example.com   -> the real INTERNAL hostname, in the second block
+#                                 below. Only needed if you run the staff deployment
+#                                 (`--profile internal`); delete that block if not.
 #   REPLACE_WITH_BCRYPT_HASH   -> output of `caddy hash-password`, generated ON
 #                                 THE SERVER and never committed here
 # The hostname is left as a placeholder on purpose: this system is multi-tenant and
@@ -42,8 +45,10 @@
 # Note what the gate does NOT protect: clearance. The UI holds ONE key and answers
 # at ONE tier for everyone who gets past the password (DECISION 2). Basic auth
 # controls WHO reaches the page; the key controls WHAT the page can see. Do not let
-# the password create a false sense that staff are seeing more than guests — they
-# are not, unless a second deployment holds a different key.
+# the password create a false sense that staff are seeing more than guests — they are
+# not. Giving staff the internal tier is the SECOND site block at the bottom of this
+# file, which authenticates each person individually; it is not something a password
+# in front of this block can do.
 
 rag.example.com {
 	encode gzip
@@ -94,6 +99,68 @@ rag.example.com {
 		flush_interval -1
 		# An LLM answer can take a while; the backend's own LLM_TIMEOUT defaults to
 		# 300s, so the proxy must not give up first.
+		transport http {
+			response_header_timeout 330s
+			read_timeout 330s
+		}
+	}
+}
+
+# ── THE INTERNAL (STAFF) SITE — optional second block ───────────────────────
+# Only needed if you started the internal deployment:
+#
+#     docker compose -f docker-compose.prod.yml --profile internal up -d
+#
+# This is the answer to Decision 2's staff question. Same image and same code as the
+# public site above; the difference is that RAG_STAFF is configured, so this one
+# authenticates individual people and acts at each person's own clearance tier.
+#
+#   REPLACE:  rag-internal.example.com  -> the real internal hostname
+#
+# It needs its own DNS A record, and Caddy gets it its own certificate automatically.
+#
+# ── WHY THERE IS NO basicauth ON THIS ONE ──────────────────────────────────
+# Deliberate, and the opposite default from the public site. Here the real boundary is
+# per-person sign-in: a 32-byte generated code per person, rate-limited attempts, and a
+# signed HttpOnly + Secure + SameSite=Lax session cookie that expires in 12 hours.
+# Putting a shared basic-auth password in front of that would make things WORSE in the
+# way that matters: staff would have two credentials to hold, the shared one would get
+# passed around in chat, and the per-person accountability this tier exists to provide
+# would quietly become "someone who had the staff password". A shared secret in front
+# of a per-person system dilutes it.
+#
+# What IS exposed to the internet is a sign-in form. That is normal and intended — it
+# reveals nothing, throttles attempts per address, and the codes are far beyond
+# guessing. Nothing behind it is reachable without a valid session.
+#
+# If you want defence in depth anyway — say, while DNS is still propagating and you'd
+# rather nobody find the form at all — add the same block used above and remove it
+# later:
+#     basicauth {
+#     	ejentic REPLACE_WITH_BCRYPT_HASH
+#     }
+#
+# A better-targeted option, if the concern is exposure rather than authentication, is
+# to restrict by source address instead of adding a password:
+#     @notoffice not remote_ip <office-or-vpn-cidr>
+#     respond @notoffice 404
+# That keeps sign-in as the only credential while making the form invisible elsewhere.
+
+rag-internal.example.com {
+	encode gzip
+
+	header {
+		Strict-Transport-Security "max-age=31536000; includeSubDomains"
+		X-Content-Type-Options "nosniff"
+		Referrer-Policy "strict-origin-when-cross-origin"
+		X-Frame-Options "DENY"
+		-Server
+	}
+
+	# 127.0.0.1:3003 — the frontend-internal container. Same container port (3002)
+	# inside; only the published host port differs, so the two UIs cannot collide.
+	reverse_proxy 127.0.0.1:3003 {
+		flush_interval -1
 		transport http {
 			response_header_timeout 330s
 			read_timeout 330s

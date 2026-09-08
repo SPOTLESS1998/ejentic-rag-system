@@ -21,6 +21,11 @@ type WhoAmI = {
   auth_required: boolean;
   is_admin: boolean;
   key_configured: boolean;
+  /** Per-person deployment only: who is signed in, and whether sign-in applies here.
+   *  On the public deployment `login_required` is false and `actor` is null. */
+  signed_in?: boolean;
+  actor?: string | null;
+  login_required?: boolean;
 };
 
 export default function Home() {
@@ -63,6 +68,12 @@ export default function Home() {
           setWhoError(data?.error ?? `Could not verify clearance (${res.status}).`);
           return;
         }
+        // On the internal deployment a session can expire while this tab sits open.
+        // Sending them to sign in beats leaving a chat box that 401s every question.
+        if (data?.login_required && data?.signed_in === false) {
+          window.location.href = "/login";
+          return;
+        }
         setWho(data as WhoAmI);
       } catch {
         if (!cancelled) setWhoError("Backend unreachable.");
@@ -71,6 +82,14 @@ export default function Home() {
     return () => {
       cancelled = true;
     };
+  }, []);
+
+  const signOut = useCallback(async () => {
+    try {
+      await fetch("/api/auth/logout", { method: "POST" });
+    } finally {
+      window.location.href = "/login";
+    }
   }, []);
 
   const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -241,6 +260,20 @@ export default function Home() {
             </span>
           ) : who ? (
             <div className="flex items-center gap-2">
+              {/* WHO, on the internal deployment. Distinct from clearance on
+                  purpose: the person comes from the session cookie this server
+                  signed, the tier comes from the backend. Two questions, two
+                  authorities — showing them separately keeps that honest. */}
+              {who.actor && (
+                <span
+                  className="text-sm px-3 py-2 rounded-md border border-neutral-700 bg-neutral-800 text-neutral-200"
+                  title="Signed in on this browser. Your access code decided your tier."
+                >
+                  <span className="text-neutral-500">signed in</span>{" "}
+                  <span className="font-medium text-white">{who.actor}</span>
+                </span>
+              )}
+
               <span
                 className="text-sm px-3 py-2 rounded-md border border-neutral-700 bg-neutral-800 text-neutral-200"
                 title={`Granted by this deployment's API key. Tags: ${tagLabel}`}
@@ -301,6 +334,19 @@ export default function Home() {
             )}
             <span>Upload Document</span>
           </button>
+
+          {/* Only on the internal deployment — the public one has nobody to sign
+              out. Ends the session on THIS browser; a code is revoked by the
+              operator, not from here (see deploy/GO_LIVE.md). */}
+          {who?.actor && (
+            <button
+              onClick={signOut}
+              title={`Signed in as ${who.actor}. Sign out of this browser.`}
+              className="text-neutral-400 hover:text-white text-sm font-medium py-2 px-4 rounded-md border border-neutral-800 hover:border-neutral-700 transition-colors"
+            >
+              Sign out
+            </button>
+          )}
         </div>
       </div>
 

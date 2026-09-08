@@ -11,6 +11,11 @@
     "moduleResolution": "bundler",
     "resolveJsonModule": true,
     "isolatedModules": true,
+    // tests/ runs directly on Node's native TypeScript stripping (`node tests/x.ts`),
+    // which requires the explicit ".ts" extension on relative imports. This flag lets
+    // tsc typecheck those files instead of rejecting the extension. Safe here because
+    // noEmit is true — nothing is compiled, so no import path is ever rewritten.
+    "allowImportingTsExtensions": true,
     "jsx": "react-jsx",
     "incremental": true,
     "plugins": [

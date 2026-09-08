@@ -14,13 +14,17 @@ steps exists. This file is the *how*.
 | | |
 |---|---|
 | Public entry point | **one** — Caddy on 443, terminating TLS, proxying to the Next.js UI |
-| Next.js UI | container, published on **127.0.0.1:3002 only** |
-| FastAPI backend | container, **publishes no port at all** — reachable only by the UI, over the internal Docker network |
-| Secrets | `/etc/ejentic-rag/server.env`, root-owned `0600`, **outside the git checkout** |
+| Next.js UI — public | container, published on **127.0.0.1:3002 only** |
+| Next.js UI — internal *(optional)* | container, **127.0.0.1:3003 only**, per-person sign-in. Opt in with `--profile internal` |
+| FastAPI backend | container, **publishes no port at all** — reachable only by the UI(s), over the internal Docker network |
+| Secrets | `/etc/ejentic-rag/server.env`, plus `internal.env` for the staff tier. Root-owned `0600`, **outside the git checkout** |
 | Survives reboot | yes — `systemd` unit, `Restart=always` |
-| Password gate | **on by default** (see Decision 3) |
+| Password gate | **on by default** on the public site (see Decision 3) |
 
-What it does **not** do: per-user login. That matters more than it sounds — see Decision 2.
+The **public** deployment has no login: it holds one key and answers at one clearance for everyone
+who opens it. That is Decision 2, and it is the thing to understand before deploying anything.
+Per-person sign-in does exist — but only on the optional **internal** deployment (step 9), which is
+a separate container on a separate hostname.
 
 ---
 
@@ -55,26 +59,28 @@ discover it.
 **This is the one that actually matters, and it is a policy question, not a technical one.**
 
 One deployed UI holds one key, so it answers at **exactly one clearance for everyone who opens it**.
-There is no "log in and see more". The password gate in Decision 3 controls *who reaches the page*;
-it does not change *what the page can see*.
+There is no "log in and see more" on the public site. The password gate in Decision 3 controls *who
+reaches the page*; it does not change *what the page can see*.
 
 | Audience | Reaches it how | Key |
 |---|---|---|
-| Public / prospects | the hostname | **guest** ← the default |
-| Staff | ? | employee |
-| You | ? | executive |
+| Public / prospects | the public hostname | **guest** ← the default |
+| Staff | the internal hostname, signing in as themselves | whichever tier each person is configured for |
+| You | the internal hostname, as yourself | executive |
 | n8n Telegram flow | server-to-server, its own key | whichever tier that flow should answer at |
 
 Set `RAG_UI_KEY` in `server.env` to the **guest** key unless you have deliberately decided
-otherwise. If staff genuinely need the internal tier, the honest options are:
+otherwise.
 
-- **(a) A second deployment** on a private hostname whose `RAG_UI_KEY` is the employee key. Cheap:
-  another compose project name, another Caddy block. Keeps the tiers physically separate.
-- **(b) Real per-user login** in the frontend. A much bigger piece of work, and the only thing that
-  gives one URL two answers.
+If staff genuinely need the internal tier, **that is now built** — it is the internal deployment in
+step 9. A second container from the same image on its own hostname, where each person signs in with
+their own generated code and the UI then acts at *that person's* tier. Turn it on with
+`--profile internal`; leave it off and nothing about the public site changes at all.
 
-Do not solve it by giving everyone the employee key and relying on the password to keep the public
-out. That collapses two independent controls into one, and the day the password leaks you lose both.
+Do **not** solve it by giving everyone the employee key and relying on the password to keep the
+public out. That collapses two independent controls into one, and the day the password leaks you
+lose both. It also destroys attribution: the audit trail would record "someone holding the employee
+key", where the internal deployment records *which person asked*.
 
 ### Decision 3 — is it public at all
 
@@ -271,6 +277,128 @@ sudo reboot          # then re-run step 7's first two checks
 The reboot test is not optional theatre. `Requires=docker.service` exists precisely because this
 races on boot and *only* on boot — it works every time you test it by hand.
 
+### 9. The internal (staff) deployment — optional
+
+Skip this entirely if the answer to Decision 2 was "guest only". Nothing above depends on it, and
+the public site is unaffected either way.
+
+Do this **after** step 7 passes. It reuses the same backend container, so the boundary has to be
+proven working before another door is added to it.
+
+**What you get:** a second UI on its own hostname where each person signs in with their own generated
+code, and the UI then acts at *that person's* clearance tier. Same image as the public site — the
+only difference is environment. `RAG_STAFF` is the hinge: unset, the code runs in single-key mode
+exactly as the public deployment does.
+
+**9a. Generate the session secret and one code per person.** All on the server:
+
+```bash
+printf 'RAG_SESSION_SECRET=%s\n' "$(openssl rand -hex 32)"
+for who in ADA PETER; do printf 'RAG_CODE_%s=%s\n' "$who" "$(openssl rand -hex 32)"; done
+```
+
+Each person gets their **own** code — not one shared staff password. The reason is revocation:
+removing one person becomes deleting one line, where a shared password can only be rotated for
+everyone at once, which in practice means never. The audit trail also records *who* asked rather
+than "someone with the staff password".
+
+Give each person their code over something private. You cannot recover it later — only replace it.
+
+**9b. Create the internal secret file:**
+
+```bash
+sudo cp deploy/internal.env.example /etc/ejentic-rag/internal.env
+sudo chmod 600 /etc/ejentic-rag/internal.env
+sudo chown root:root /etc/ejentic-rag/internal.env
+sudo -e /etc/ejentic-rag/internal.env
+```
+
+Fill in `RAG_STAFF` (e.g. `ada=employee,peter=executive`), one `RAG_CODE_<ID>` per person, and
+`RAG_SESSION_SECRET`. The role keys are **not** repeated here — compose passes them through from
+`server.env`, so each key has exactly one home.
+
+**9c. Start it:**
+
+```bash
+set -a; . /etc/ejentic-rag/server.env; set +a
+docker compose -f docker-compose.prod.yml --profile internal up -d --build
+```
+
+The `--profile internal` is what makes this opt-in. Without it, `up -d` brings up exactly what it
+did before — public UI plus backend.
+
+**9d. DNS and Caddy.** Point the internal hostname at the box, then paste the **second** block from
+`deploy/Caddyfile.rag` (the `rag-internal.example.com` one) into `/etc/caddy/Caddyfile`:
+
+```bash
+sudo caddy validate --adapter caddyfile --config /etc/caddy/Caddyfile
+sudo systemctl reload caddy
+```
+
+That block has no `basicauth` on purpose — per-person sign-in *is* the boundary here, and a shared
+password in front of it would both add a second credential to hold and quietly collapse the
+per-person accountability back into "someone who had the staff password". The reasoning, and the
+address-restriction alternative if you want the form hidden anyway, are in the Caddyfile itself.
+
+**9e. Verify it — the part that matters.** Against the real hostname:
+
+```bash
+HI=https://rag-internal.<yourdomain>
+
+# 1. Not signed in: the API refuses outright. Never a quiet public-tier answer.
+curl -s -o /dev/null -w 'chat, no session:  %{http_code}\n' -X POST "$HI/api/rag/chat" \
+  -H 'Content-Type: application/json' -d '{"query":"hi"}'                       # expect 401
+
+# 2. A page request bounces to sign-in, rather than loading a chat box that 401s.
+curl -s -o /dev/null -w 'page, no session:  %{http_code} -> %{redirect_url}\n' "$HI/"
+                                                                               # expect 307 -> /login
+
+# 3. A wrong code is refused, and reveals nothing about why.
+curl -s -X POST "$HI/api/auth/login" -H 'Content-Type: application/json' \
+  -d '{"code":"definitely-not-a-real-access-code-at-all"}'                      # 401, generic message
+
+# 4. A real code mints a session. Check the cookie flags on the way past.
+curl -s -D - -o /dev/null -c /tmp/rag.jar -X POST "$HI/api/auth/login" \
+  -H 'Content-Type: application/json' -d '{"code":"<ada-code>"}' | grep -i set-cookie
+# must show ALL of: HttpOnly   SameSite=Lax   Secure
+```
+
+`HttpOnly` means an XSS cannot read the session; `Secure` means it never travels unencrypted;
+`SameSite=Lax` is what blocks cross-site POSTs. If any of the three is missing, stop.
+
+```bash
+# 5. Signed in: WHO and WHAT tier are reported separately, from two different authorities.
+curl -s -b /tmp/rag.jar "$HI/api/rag/whoami"
+# signed_in:true, actor:"ada" (from the cookie this server signed),
+# role:"employee"           (from the backend, derived from the key)
+
+# 6. staff_problems MUST be empty. Anything listed there is a configured person who
+#    cannot sign in — usually a tier whose RAG_KEY_* is missing.
+curl -s -b /tmp/rag.jar "$HI/api/rag/whoami" | grep -o '"staff_problems":\[[^]]*\]'
+
+# 7. The tier is real, not cosmetic: an employee still cannot read executive material.
+curl -s -b /tmp/rag.jar -X POST "$HI/api/rag/chat" -H 'Content-Type: application/json' \
+  -d '{"query":"What was Q2 revenue?"}'                        # a refusal, and NO $2.4M anywhere
+
+# 8. A tampered session is rejected. Flip the last character of the cookie value.
+S=$(sed -n 's/.*rag_session\t\(.*\)$/\1/p' /tmp/rag.jar)
+curl -s -o /dev/null -w 'tampered cookie:   %{http_code}\n' \
+  -b "rag_session=${S%?}X" -X POST "$HI/api/rag/chat" \
+  -H 'Content-Type: application/json' -d '{"query":"hi"}'                        # expect 401
+
+# 9. Still no key in anything the browser receives.
+curl -s "$HI/login" | grep -o 'RAG_KEY_[A-Z]*\|[0-9a-f]\{64\}' || echo "OK: no key in the HTML"
+```
+
+Step 8 is the one that proves the whole design: the session payload is signed, not encrypted, so
+anyone can read `{"id":"ada","role":"employee"}` out of their own cookie — and changing `employee`
+to `executive` invalidates the signature. If a tampered cookie ever returns `200`, the tier boundary
+is gone.
+
+Then sign in as a second person at a different tier and confirm they get a *different* answer to
+the same question. Two people, two tiers, one URL — that is the thing the public deployment cannot
+do, and the only reason this second container exists.
+
 ---
 
 ## Routine operations
@@ -288,6 +416,38 @@ sudo systemctl restart ejentic-rag         # picks up EnvironmentFile + restarts
 Then re-run step 7. **If you rotate the key the UI holds, update `RAG_UI_KEY` in the same edit** —
 they are two variables holding one value, and changing only one leaves the UI authenticating with a
 key the server no longer knows. The symptom is a UI that loads fine and 401s on every question.
+
+### Removing or changing someone's access (internal tier)
+
+Editing who may sign in is editing one file and restarting one container:
+
+```bash
+sudo -e /etc/ejentic-rag/internal.env      # RAG_STAFF: delete a line to remove someone,
+                                            # change their role to move their tier
+docker compose -f docker-compose.prod.yml --profile internal up -d frontend-internal
+```
+
+**This takes effect on that person's *next request*, not whenever their cookie expires.** Their
+session cookie stays validly signed for up to the session TTL (12h by default), but the proxy
+re-reads `RAG_STAFF` on every request and serves the tier the *config* now says — never the tier
+baked into the cookie at login. A removed person is signed out on their next click; a demoted one
+drops to their lower tier immediately, and their cookie is never honoured at the higher one.
+
+Because of that, you do **not** rotate `RAG_SESSION_SECRET` to remove one person — that invalidates
+*everyone's* cookie and signs the whole team out at once. Rotate the secret only if you believe the
+secret itself leaked. To also retire that person's *code* so it can never sign in again, clear their
+`RAG_CODE_<ID>` in the same edit — removing them from `RAG_STAFF` already stops the code working, but
+clearing it leaves nothing behind to leak.
+
+Confirm it after the restart, using that person's old cookie against any `/api/rag/*` route:
+
+```bash
+curl -s -o /dev/null -w '%{http_code}\n' -b /tmp/rag.jar -X POST "$HI/api/rag/chat" \
+  -H 'Content-Type: application/json' -d '{"query":"hi"}'        # expect 401
+```
+
+The JSON body says which: `Your access has changed` for a removal, `Your access level has changed`
+for a tier move. Either way the answer is a refusal, never a quiet downgrade to a narrower tier.
 
 ### Deploying a change
 
@@ -339,5 +499,7 @@ Deliberately not done here, because each needs something I should not decide alo
 - **The n8n Telegram flow** already carries `X-API-Key` and a `RAG_KEY` reference but has never run
   against an authenticated server. Point it at the deployed hostname with its own key (Decision 2
   applies again: whichever tier that flow should answer at) and walk the Telegram path end to end.
-- **Decision 2's staff tier.** If the answer turns out to be "staff need internal", that is a second
-  deployment or real login — neither is a config tweak.
+- **Whether to run the staff tier at all.** The internal deployment is *built* (step 9) and its
+  auth boundary is tested, but running it is still a deliberate choice: it stands up a second
+  internet-facing surface and means handing out per-person codes. Skip it entirely if guest-only is
+  the answer to Decision 2 — nothing else depends on it.

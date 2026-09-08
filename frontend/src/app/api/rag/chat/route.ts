@@ -4,13 +4,19 @@
  * The browser holds no API key. This route adds it, and pipes the backend's SSE
  * body straight back unchanged so the `data: {"chunk"}` / `[DONE]` contract the
  * UI already parses is untouched.
+ *
+ * On the internal deployment the key depends on WHO is signed in (resolveCaller), so
+ * an unauthenticated request is a 401 here rather than a public-tier answer.
  */
-import { backendHeaders, passThroughError, RAG_BASE_URL } from "@/lib/rag-proxy";
+import { backendHeaders, callerError, passThroughError, resolveCaller, RAG_BASE_URL } from "@/lib/rag-proxy";
 
 /** Never prerender or cache: every call is a live stream. */
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
+  const resolved = resolveCaller(request);
+  if (!resolved.ok) return callerError(resolved);
+
   let body: { query?: string; clearance_level?: string; platform?: string };
   try {
     body = await request.json();
@@ -29,6 +35,7 @@ export async function POST(request: Request) {
   const upstream = await fetch(`${RAG_BASE_URL}/chat`, {
     method: "POST",
     headers: backendHeaders(
+      resolved.caller,
       { "Content-Type": "application/json", Accept: "text/event-stream" },
       request.headers.get("X-Upload-Token"),
     ),
