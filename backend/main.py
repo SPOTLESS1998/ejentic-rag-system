@@ -519,7 +519,15 @@ else:
     last_err = None
     for attempt in range(1, 6):
         try:
-            Settings.llm = NVIDIA(model=LLM_MODEL, api_key=NVIDIA_API_KEY, timeout=LLM_TIMEOUT)
+            # LLM_BASE_URL/LLM_API_KEY = optional provider-swap escape hatch:
+            # point the LLM (not embeddings) at any OpenAI-compatible endpoint.
+            # Unset -> the NVIDIA hosted stack, exactly as before.
+            Settings.llm = NVIDIA(
+                model=LLM_MODEL,
+                api_key=os.environ.get("LLM_API_KEY") or NVIDIA_API_KEY,
+                timeout=LLM_TIMEOUT,
+                base_url=os.environ.get("LLM_BASE_URL") or None,
+            )
             print(f"[llm] {LLM_MODEL} initialized (attempt {attempt}).")
             last_err = None
             break
