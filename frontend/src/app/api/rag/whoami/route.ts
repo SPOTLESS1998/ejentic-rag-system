@@ -24,6 +24,14 @@ export const dynamic = "force-dynamic";
 export async function GET(request: Request) {
   const resolved = resolveCaller(request);
 
+  // A MISCONFIGURED deployment is an error, and is reported as one. Distinct from the
+  // not-signed-in case below: "you are nobody" is a valid answer to "who am I?", but
+  // "this deployment cannot serve anyone" is not — it needs to reach a human. Passing
+  // the status through means the UI shows the reason instead of an empty chat shell.
+  if (!resolved.ok && resolved.status !== 401) {
+    return Response.json({ error: resolved.detail }, { status: resolved.status });
+  }
+
   // Not signed in on a per-person deployment. Answer 200 with `signed_in: false`
   // rather than 401: this endpoint is what the UI calls to find out whether it needs
   // to show the sign-in screen, so "you are nobody" is a valid answer to the
@@ -34,7 +42,6 @@ export async function GET(request: Request) {
         signed_in: false,
         login_required: loginEnabled(),
         key_configured: hasApiKey(),
-        ...(resolved.status === 503 ? { error: resolved.detail } : {}),
       },
       { status: 200 },
     );

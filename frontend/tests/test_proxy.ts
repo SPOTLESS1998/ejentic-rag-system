@@ -40,7 +40,7 @@ import {
   type Caller,
 } from "../src/lib/rag-proxy.ts";
 import { createSession, SESSION_COOKIE } from "../src/lib/session.ts";
-import { keyEnvForRole } from "../src/lib/staff.ts";
+import { keyEnvForRole, staffConfig } from "../src/lib/staff.ts";
 
 let pass = 0;
 let fail = 0;
@@ -98,6 +98,12 @@ function requestWith(cookieValue: string | null): Request {
  *  status AND the reason without fighting the discriminated union at every call site. */
 function denied(r: CallerResult): { status: number; detail: string } | null {
   return r.ok ? null : { status: r.status, detail: r.detail };
+}
+
+/** How many configured people this deployment cannot serve. Pairs with hasApiKey():
+ *  "configured but unservable" must show up as a problem, not as silence. */
+function staffProblemCount(): number {
+  return staffConfig().problems.length;
 }
 
 // ── SINGLE-KEY (PUBLIC) MODE ────────────────────────────────────────────────────
@@ -249,6 +255,58 @@ section("removal and demotion take effect on the next request, not at cookie exp
 // fail-closed backstop against a future change to staffConfig, so there is no reachable
 // input to assert it against — proving that is itself the point.
 
+// ── RAG_REQUIRE_LOGIN: SIGN-IN CANNOT SILENTLY SWITCH ITSELF OFF ────────────────
+// RAG_STAFF is the on/off switch for the whole auth layer, and it fails in the
+// dangerous direction: emptied or typo'd, the code drops to single-key mode. On the
+// public site that is correct. On the internal site — which deliberately has no
+// basic-auth password in front of it — it is the boundary vanishing. These prove the
+// declaration is enforced, and equally that it does NOT touch the public deployment.
+section("a deployment that declared per-person login refuses to serve without it");
+{
+  // THE SCENARIO THAT MATTERS: RAG_STAFF broke AND a shared key is present. Without
+  // the guard this serves that key's tier to every visitor with no sign-in at all.
+  setEnv({ RAG_REQUIRE_LOGIN: "1", RAG_API_KEY: "executive-tier-key" });
+  const r = resolveCaller(requestWith(null));
+  const d = denied(r);
+  check("login required + no staff + stray shared key -> refused", r.ok === false);
+  check("  ...as 503 (our config is broken, not their permission)", d?.status === 503);
+  check("  ...and the stray key is NEVER served", r.ok === false);
+  check("  ...reason names both variables so an operator can act",
+    (d?.detail ?? "").includes("RAG_REQUIRE_LOGIN") && (d?.detail ?? "").includes("RAG_STAFF"));
+}
+{
+  setEnv({ RAG_REQUIRE_LOGIN: "1" });
+  check("login required + no staff + no key at all -> still refused", resolveCaller(requestWith(null)).ok === false);
+}
+{
+  // The guard must not break the deployment it is protecting: with staff configured,
+  // per-person mode behaves exactly as before.
+  staffEnv({ RAG_REQUIRE_LOGIN: "1" });
+  check("login required + staff configured + no cookie -> ordinary 401", denied(resolveCaller(requestWith(null)))?.status === 401);
+  const { value } = createSession("ada", "employee");
+  const r = resolveCaller(requestWith(value));
+  check("login required + staff configured + valid session -> served normally",
+    r.ok === true && r.caller.key === EMP_KEY);
+}
+{
+  // THE PUBLIC DEPLOYMENT MUST BE UNAFFECTED. It never sets RAG_REQUIRE_LOGIN, so an
+  // empty RAG_STAFF still means "single-key mode", exactly as before this guard existed.
+  setEnv({ RAG_API_KEY: "guest-key" });
+  const r = resolveCaller(requestWith(null));
+  check("public deployment (no RAG_REQUIRE_LOGIN) is untouched -> still served",
+    r.ok === true && r.caller.key === "guest-key");
+}
+{
+  // Only the exact string "1" opts in. A half-set value must not be read as "on" —
+  // that would silently 503 a public deployment — nor as "off" by accident.
+  for (const v of ["", "0", "true", "yes", "2", " "]) {
+    setEnv({ RAG_REQUIRE_LOGIN: v, RAG_API_KEY: "k" });
+    check(`RAG_REQUIRE_LOGIN=${JSON.stringify(v)} does not enable the guard`, resolveCaller(requestWith(null)).ok === true);
+  }
+  setEnv({ RAG_REQUIRE_LOGIN: " 1 ", RAG_API_KEY: "k" });
+  check("RAG_REQUIRE_LOGIN=' 1 ' is trimmed and DOES enable it", resolveCaller(requestWith(null)).ok === false);
+}
+
 // ── backendHeaders: THE PROXY CHOOSES THE KEY, NOT THE CALLER ───────────────────
 section("backendHeaders never lets a client-supplied credential through");
 {
@@ -291,7 +349,35 @@ section("hasApiKey reflects whether the deployment can authenticate at all");
   setEnv({});
   check("single-key mode with no key -> false", hasApiKey() === false);
   staffEnv();
-  check("per-person mode -> true", hasApiKey() === true);
+  check("per-person mode with servable staff -> true", hasApiKey() === true);
+}
+{
+  // The case the old `return true` got wrong: staff are configured, but NOT ONE role
+  // has a backend key, so staffConfig() drops everybody and nobody on earth can sign
+  // in. /whoami's `key_configured` must not claim this deployment is configured — that
+  // is precisely the moment an operator is reading it to find out what is broken.
+  setEnv({
+    RAG_SESSION_SECRET: SECRET,
+    RAG_STAFF: "ada=employee,peter=executive",
+    RAG_CODE_ADA: CODE,
+    RAG_CODE_PETER: CODE,
+    // deliberately no RAG_KEY_* at all
+  });
+  check("per-person mode where NO role has a key -> false (was wrongly true)", hasApiKey() === false);
+  check("  ...and every configured person is reported as a problem", staffProblemCount() === 2);
+}
+{
+  // Partially configured: employee has a key, executive does not. One person is
+  // servable, so the deployment IS configured — and the other is a reported problem.
+  setEnv({
+    RAG_SESSION_SECRET: SECRET,
+    RAG_STAFF: "ada=employee,peter=executive",
+    RAG_CODE_ADA: CODE,
+    RAG_CODE_PETER: CODE,
+    RAG_KEY_EMPLOYEE: EMP_KEY,
+  });
+  check("per-person mode with one servable tier -> true", hasApiKey() === true);
+  check("  ...and the unservable person is a reported problem", staffProblemCount() === 1);
 }
 
 // ── callerError / passThroughError ──────────────────────────────────────────────

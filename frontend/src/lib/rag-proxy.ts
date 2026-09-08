@@ -78,6 +78,26 @@ function singleKey(): string {
 }
 
 /**
+ * Has this deployment DECLARED that it authenticates individual people?
+ *
+ * Set `RAG_REQUIRE_LOGIN=1` in internal.env (the template ships with it on). It is a
+ * statement of intent, and it exists because `RAG_STAFF` is load-bearing in a direction
+ * that fails silently: if it is emptied, commented out, or typo'd, `loginEnabled()`
+ * simply goes false and the code drops into single-key mode. On the PUBLIC site that is
+ * the correct behaviour. On the INTERNAL site it is the whole boundary disappearing —
+ * and that site deliberately has no basic-auth password in front of it (see
+ * deploy/Caddyfile.rag), precisely because per-person sign-in was supposed to BE the
+ * fence. So the one host where this mistake is unmitigated is the one host where it
+ * matters most.
+ *
+ * With this set, a deployment that cannot authenticate people refuses to serve instead
+ * of quietly serving everyone at whatever tier a stray `RAG_API_KEY` grants.
+ */
+function requireLogin(): boolean {
+  return (process.env.RAG_REQUIRE_LOGIN ?? "").trim() === "1";
+}
+
+/**
  * Resolve who this request acts as.
  *
  * In per-person mode a missing or invalid session is a 401 — and note what is NOT
@@ -104,6 +124,20 @@ function singleKey(): string {
  */
 export function resolveCaller(request: Request): CallerResult {
   if (!loginEnabled()) {
+    // A deployment that declared itself an authenticating one must not become a
+    // single-key one because a variable went missing. This is the only path by which
+    // per-person sign-in can silently switch off, so it is the only place the
+    // declaration is enforced.
+    if (requireLogin()) {
+      return {
+        ok: false,
+        status: 503,
+        detail:
+          "This deployment requires per-person sign-in (RAG_REQUIRE_LOGIN=1) but no staff " +
+          "are configured (RAG_STAFF is empty or unparseable). Refusing to serve rather " +
+          "than falling back to one shared key for everyone.",
+      };
+    }
     // Single-key mode. An absent key is not rejected here: /whoami reports
     // `key_configured: false` so an operator can tell "no key set in this
     // deployment" from "key rejected", which otherwise look identical.
@@ -179,8 +213,14 @@ export function backendHeaders(
 /** True when this deployment can authenticate to the backend at all. */
 export function hasApiKey(): boolean {
   if (!loginEnabled()) return singleKey().length > 0;
-  // In per-person mode, "configured" means at least one staffed role has a key.
-  return true;
+  // Per-person mode has no single key, so the question becomes "can this deployment
+  // serve anybody at all?". staffConfig() already drops anyone whose tier has no
+  // backend key, so a non-empty entries list IS that check.
+  //
+  // This used to `return true` unconditionally, which reported `key_configured: true`
+  // on a deployment where every RAG_KEY_* was missing and nobody could sign in — the
+  // exact moment the diagnostic needed to be right.
+  return staffConfig().entries.length > 0;
 }
 
 /** Turn a failed caller resolution into the response the browser sees. */

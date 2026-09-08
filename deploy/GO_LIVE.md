@@ -317,6 +317,15 @@ Fill in `RAG_STAFF` (e.g. `ada=employee,peter=executive`), one `RAG_CODE_<ID>` p
 `RAG_SESSION_SECRET`. The role keys are **not** repeated here — compose passes them through from
 `server.env`, so each key has exactly one home.
 
+Two things in that file are load-bearing and should be left exactly as they ship. `RAG_REQUIRE_LOGIN=1`
+means a deployment that *cannot* authenticate people refuses to serve (503) rather than quietly
+serving everyone at one tier — because `RAG_STAFF` is the on/off switch for sign-in, and it fails in
+the dangerous direction when emptied or typo'd. And **`RAG_API_KEY` must never be added to
+internal.env**, not even while debugging: an empty `RAG_STAFF` *plus* a shared key present is the only
+combination that serves unauthenticated visitors here, and this site has no password in front of it by
+design. With the key absent, the same mistake sends no credential and the backend 401s everything —
+loud, and fixed in minutes.
+
 **9c. Start it:**
 
 ```bash
@@ -482,6 +491,9 @@ delete the audit trail, so treat that flag accordingly.
 | Caddy won't load the config | `basicauth` vs `basic_auth` — the directive was renamed in Caddy 2.8. `caddy version`, then match. |
 | Compose refuses to start, complains about a variable | Working as designed. `RAG_UI_KEY` and `RAG_CORS_ORIGINS` use the `:?` form so an unset value stops the deploy instead of quietly bringing up an unauthenticated UI. |
 | UI loads, every question 401s | `RAG_UI_KEY` does not match any current `RAG_KEY_*` — typically a rotation that updated only one of the two. |
+| Internal site returns 503 on everything, "requires per-person sign-in" | Working as designed. `RAG_REQUIRE_LOGIN=1` is set but `RAG_STAFF` is empty or unparseable, so nobody can sign in — it refuses rather than serving everyone at one tier with no login. Fix `RAG_STAFF`, don't remove the guard. |
+| Internal site: one person cannot sign in, everyone else can | Their tier has no backend key, or their `RAG_CODE_<ID>` is missing/under 24 chars. They are refused rather than silently downgraded. `curl -b jar $HI/api/rag/whoami` and read `staff_problems` — it names the person and the reason. |
+| Internal site: everyone signed out at once | `RAG_SESSION_SECRET` changed (or the container was rebuilt with a new one). Every cookie was signed with the old value. To remove ONE person, edit `RAG_STAFF` instead — see "Removing or changing someone's access". |
 | Answers arrive all at once after a long pause | SSE is being buffered. Check `flush_interval -1` survived the paste into `/etc/caddy/Caddyfile`. |
 | Answers time out around 30s | A proxy timeout below the backend's `LLM_TIMEOUT` (default 300s). The supplied Caddy block allows 330s. |
 | `libgomp.so.1: cannot open shared object file` | Torch's OpenMP runtime missing. `Dockerfile.prod` installs `libgomp1`; the dev Dockerfile does not. |
