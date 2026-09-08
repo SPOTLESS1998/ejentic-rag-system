@@ -52,6 +52,14 @@ sentence-transformers==3.4.1
 # NumPy 1.x — pairing it with NumPy 2 raises "_ARRAY_API not found" at import.
 # Linux can take a modern torch and is fine with NumPy 2. These markers let ONE
 # requirements file install correctly on both instead of needing a second file.
+#
+# ⚠️ The third marker is written as `!= ... or != ...` and NOT as
+# `not (... and ...)`. PEP 508 marker grammar has no prefix `not (...)` negation
+# (only `in` / `not in`), so the readable-looking version is a hard parse error —
+# `pip install -r requirements.txt` refuses the WHOLE file, on every platform, even
+# where that line would not apply. This is the De Morgan equivalent and is valid.
+# It cost a failed production image build to find, because a requirements file that
+# has never been installed from is a hypothesis, not a fact.
 torch==2.2.2;   sys_platform == "darwin" and platform_machine == "x86_64"
 numpy==1.26.4;  sys_platform == "darwin" and platform_machine == "x86_64"
-torch>=2.5;     not (sys_platform == "darwin" and platform_machine == "x86_64")
+torch>=2.5;     sys_platform != "darwin" or platform_machine != "x86_64"

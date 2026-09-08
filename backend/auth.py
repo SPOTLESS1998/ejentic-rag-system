@@ -36,6 +36,7 @@ from __future__ import annotations
 
 import hmac
 import os
+import re
 from typing import Optional
 
 from fastapi import Header, HTTPException
@@ -43,6 +44,37 @@ from fastapi import Header, HTTPException
 # Header names we accept a key on. `X-API-Key` is the documented one; Bearer is
 # accepted because n8n, curl habits and most HTTP clients reach for it first.
 API_KEY_HEADER = "X-API-Key"
+
+# WHO is asking, for the audit trail ONLY. Set by the frontend proxy on the internal
+# per-person deployment; absent on the public one, where the key is the only identity.
+#
+# ⚠️ Never consulted for authorization. Clearance is derived from the API key alone
+# (`resolve_role` below). Anyone holding a key could forge this header, so it is
+# exactly as trustworthy as the proxy that sets it — which is why it is recorded and
+# never acted upon. See the `actor` column in database.py.
+ACTOR_HEADER = "X-Actor"
+
+
+def clean_actor(value: Optional[str]) -> Optional[str]:
+    """Sanitise the caller-supplied actor id before it reaches the audit trail.
+
+    Returns None for anything absent or implausible. This value lands in the audit DB
+    and in log lines, and it arrives in a header, so it is caller-controlled: restrict
+    the character set and cap the length rather than storing whatever was sent.
+
+    The rule matches the frontend's own id rule (a-z, 0-9, hyphen, underscore) plus
+    dot and upper case. Deliberately conservative — a rejected actor is stored as NULL,
+    which is honest, whereas a mangled or truncated one puts a *wrong* name against a
+    query, and a wrong name in an audit trail is worse than no name at all.
+    """
+    if not value:
+        return None
+    v = value.strip()
+    if not v or len(v) > 64:
+        return None
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", v):
+        return None
+    return v
 
 
 class AuthError(Exception):

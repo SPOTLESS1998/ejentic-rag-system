@@ -53,6 +53,17 @@ class AuditLog(Base):
     # Which tenant this row belongs to. Indexed because every read filters on it.
     client = Column(String(64), index=True)
     clearance_level = Column(String(50), index=True)
+    # WHO asked — set only when the caller is an individually-identified person. The
+    # internal per-person deployment sends `X-Actor: <staff id>`; the public
+    # deployment sends nothing, because there the API key is the only identity and
+    # nobody is individually identified, so this stays NULL.
+    #
+    # ⚠️ ATTRIBUTION, NEVER AUTHORIZATION. The value is caller-supplied, so it is
+    # exactly as trustworthy as whoever holds the API key. Clearance is still derived
+    # from the key alone (auth.py) and nothing is granted on the strength of this
+    # column. Its job is answering "which of our executives ran that query", which a
+    # shared key cannot answer at all.
+    actor = Column(String(64), nullable=True, index=True)
     query_text = Column(Text)
     response_snippet = Column(Text)
 
@@ -68,9 +79,10 @@ class AuditLog(Base):
     gated = Column(Integer, default=0)
 
 
-# The token columns were added after the first version of this table shipped.
-# create_all() won't ALTER an existing table, so on a pre-existing DB we add any
-# missing columns by hand. Additive only — never drops or rewrites data.
+# Columns added after the first version of this table shipped (token accounting, then
+# the tenant column, then the actor column). create_all() won't ALTER an existing
+# table, so on a pre-existing DB we add any missing ones by hand. Additive only —
+# never drops or rewrites data.
 _TOKEN_COLUMNS = {
     "prompt_tokens": "INTEGER",
     "completion_tokens": "INTEGER",
@@ -79,6 +91,7 @@ _TOKEN_COLUMNS = {
     "token_source": "VARCHAR(20)",
     "gated": "INTEGER DEFAULT 0",
     "client": "VARCHAR(64)",
+    "actor": "VARCHAR(64)",
 }
 
 
@@ -101,6 +114,13 @@ def _migrate(sync_conn):
     sync_conn.exec_driver_sql(
         "CREATE INDEX IF NOT EXISTS ix_audit_logs_client ON audit_logs (client)"
     )
+    # Note the deliberate asymmetry with `client` above: pre-existing rows are NOT
+    # backfilled with an actor. A NULL here is the truthful answer — those queries
+    # really were made before anyone was individually identified, and inventing an
+    # actor for them would put a name against a query that name may not have run.
+    sync_conn.exec_driver_sql(
+        "CREATE INDEX IF NOT EXISTS ix_audit_logs_actor ON audit_logs (actor)"
+    )
 
 
 async def init_db():
@@ -121,6 +141,7 @@ async def log_query(
     token_source: str = None,
     gated: bool = False,
     client: str = None,
+    actor: str = None,
 ):
     # Audit logging is a side-effect, never the point of the request. It runs as
     # a fire-and-forget task, so if it ever fails (e.g. a schema drift on an old
@@ -132,6 +153,11 @@ async def log_query(
             log_entry = AuditLog(
                 client=client or ACTIVE_CLIENT,
                 clearance_level=clearance,
+                # Truncated defensively: the value arrives in a header, so it is
+                # caller-controlled. The column is VARCHAR(64) and SQLite will not
+                # enforce that, so enforce it here rather than storing something
+                # absurd. main.py sanitises the character set at the boundary.
+                actor=(actor or None) and str(actor)[:64],
                 query_text=query,
                 response_snippet=response[:1000],  # store up to 1000 chars of response
                 prompt_tokens=prompt_tokens,

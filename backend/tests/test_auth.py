@@ -293,15 +293,26 @@ section("endpoints actually enforce it")
 # single endpoint forgot to call it — which is how the original hole existed.
 m = import_main()
 
+# What the last stubbed call was told. Lets a test assert not only the answer but WHAT
+# the endpoint forwarded — the actor especially, which is invisible in the response.
+LAST_CALL: dict = {}
 
-async def _fake_answer(query, clearance_level, platform, upload_token=""):
+
+async def _fake_answer(query, clearance_level, platform, upload_token="", actor=None):
     """Stand-in for the whole retrieve->rerank->synthesize pipeline.
 
     Must return answer_once's real 4-tuple (text, meter, gated, saved) — the
     endpoint unpacks it to build the X-* token headers. It echoes the clearance it
     was CALLED with, which is how we prove the endpoint passed the key's role
     through rather than the body's claim.
+
+    `actor` mirrors the real signature: the endpoint forwards a sanitised X-Actor for
+    the audit trail. It is recorded rather than echoed into the answer, because it must
+    never influence what the caller can read — only what the audit row says.
     """
+    LAST_CALL.clear()
+    LAST_CALL.update(query=query, clearance_level=clearance_level,
+                     platform=platform, upload_token=upload_token, actor=actor)
     return f"ANSWER for clearance={clearance_level}", m.TokenMeter(), False, 0
 
 
@@ -377,6 +388,43 @@ with env(**KEYS):
         r = client.post("/api/rag", json={"query": "hi"},
                         headers={"Authorization": f"Bearer {EMP}"})
         check("a Bearer key is accepted", r.status_code == 200, f"got {r.status_code}")
+
+        # --- X-Actor: recorded for the audit trail, NEVER authorization ----
+        # The internal frontend sends this so an audit row can say WHO asked. It is
+        # caller-supplied, so the rules are: forward it sanitised, and let it change
+        # nothing about what the caller may read.
+        r = client.post("/api/rag", json={"query": "hi"},
+                        headers={"X-API-Key": GUEST, "X-Actor": "ada"})
+        check("a request carrying X-Actor still succeeds", r.status_code == 200)
+        check("the endpoint forwards the actor for the audit trail",
+              LAST_CALL.get("actor") == "ada", str(LAST_CALL.get("actor")))
+        check("carrying an actor does NOT change the clearance used",
+              "clearance=guest" in r.json().get("response", ""), r.text[:120])
+
+        # A guest key claiming to be the executive by name gets exactly nothing extra:
+        # the name is recorded, the tier still comes from the key.
+        r = client.post("/api/rag", json={"query": "What was Q2 revenue?"},
+                        headers={"X-API-Key": GUEST, "X-Actor": "peter"})
+        check("naming a privileged person in X-Actor grants no privilege",
+              r.status_code == 200 and "clearance=guest" in r.json().get("response", ""),
+              r.text[:120])
+        check("  ...and the claimed name is still recorded, not silently dropped",
+              LAST_CALL.get("actor") == "peter", str(LAST_CALL.get("actor")))
+
+        # Junk is sanitised to None at the boundary rather than reaching the DB.
+        for junk, why in (("ada bob", "space"),
+                          ("ada\nfake log line", "newline"),
+                          ("a" * 200, "over-long"),
+                          ("<script>x</script>", "HTML")):
+            r = client.post("/api/rag", json={"query": "hi"},
+                            headers={"X-API-Key": GUEST, "X-Actor": junk})
+            check(f"a bogus actor ({why}) is dropped, and the request still works",
+                  r.status_code == 200 and LAST_CALL.get("actor") is None,
+                  f"status={r.status_code} actor={LAST_CALL.get('actor')!r}")
+
+        r = client.post("/api/rag", json={"query": "hi"}, headers={"X-API-Key": GUEST})
+        check("no X-Actor header at all -> actor is None (public deployment)",
+              LAST_CALL.get("actor") is None, str(LAST_CALL.get("actor")))
 
         # --- /whoami tells a caller about ITSELF ---------------------------
         r = client.get("/whoami", headers={"X-API-Key": EMP})

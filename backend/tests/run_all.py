@@ -23,6 +23,7 @@ SUITES = [
     ("test_upload_safety.py", "path traversal + per-caller upload scoping"),
     ("test_stream.py", "the duplicate-delta and prefix-leak stream bugs"),
     ("test_tenancy.py", "per-tenant data isolation (MULTITENANCY.md)"),
+    ("test_audit_actor.py", "WHO asked — the audit trail's actor column"),
 ]
 
 results = []

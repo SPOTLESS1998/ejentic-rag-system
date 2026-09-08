@@ -458,6 +458,38 @@ curl -s -o /dev/null -w '%{http_code}\n' -b /tmp/rag.jar -X POST "$HI/api/rag/ch
 The JSON body says which: `Your access has changed` for a removal, `Your access level has changed`
 for a tier move. Either way the answer is a refusal, never a quiet downgrade to a narrower tier.
 
+### Reading the audit trail (who asked what)
+
+Every answered query writes one row: when, which tier, the query text, the token cost — and, on the
+internal deployment, **which person asked**. That last column is what a shared key cannot give you.
+
+```bash
+docker compose -f docker-compose.prod.yml exec backend python - <<'PY'
+import glob, sqlite3
+path = (glob.glob("data/*/audit.db") or ["ejentic_audit.db"])[0]
+rows = sqlite3.connect(path).execute("""
+    SELECT timestamp, COALESCE(actor,'-') AS who, clearance_level,
+           substr(query_text,1,60)
+    FROM audit_logs ORDER BY id DESC LIMIT 20""")
+for ts, who, tier, q in rows:
+    print(f"{ts}  {who:<12} {tier:<18} {q}")
+PY
+```
+
+To see everything one person ran, add `WHERE actor = 'ada'`. The column is indexed, so this stays
+fast as the table grows.
+
+A `-` in the `who` column means nobody was individually identified, and that is expected in three
+cases: rows from the **public** deployment (where the API key is the only identity), rows written
+**before** this column existed, and rows where the id failed validation. Old rows are deliberately
+**not** backfilled with a guessed name — a wrong name in an audit trail is worse than no name,
+because it points an investigation at the wrong person.
+
+⚠️ **Attribution, not proof.** The actor is set by the internal frontend from the signed-in session,
+so it is exactly as trustworthy as that proxy — it tells you which signed-in session made the call.
+Clearance is never derived from it; that still comes from the API key alone. Treat these rows as a
+strong operational record, not forensic evidence.
+
 ### Deploying a change
 
 ```bash

@@ -938,10 +938,13 @@ def _consume_prefix_delta(buffer: str, delta: str):
 # Answer producers (shared by both endpoints)
 # ---------------------------------------------------------------------------
 async def answer_once(query: str, clearance_level: str, platform: str,
-                      upload_token: str = ""):
+                      upload_token: str = "", actor: str = None):
     """Non-streaming answer for /api/rag (n8n). Returns (text, meter, gated,
     saved_tokens) so the endpoint can surface token counts in headers without
-    touching the frozen JSON body."""
+    touching the frozen JSON body.
+
+    `actor` is recorded in the audit trail and used for nothing else — clearance was
+    already decided from the API key before this is called."""
     meter = TokenMeter()
     if global_index is None:
         return "System Offline: AI Core is booting or missing API keys.", meter, False, 0
@@ -955,7 +958,7 @@ async def answer_once(query: str, clearance_level: str, platform: str,
                 prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
                 total_tokens=meter.total_tokens, estimated_saved_tokens=saved,
                 token_source=meter.source if meter.total_tokens else "gate", gated=True,
-                client=ACTIVE_CLIENT,
+                client=ACTIVE_CLIENT, actor=actor,
             ))
             return ESCALATION_LINE, meter, True, saved
 
@@ -969,19 +972,22 @@ async def answer_once(query: str, clearance_level: str, platform: str,
             f"{platform}_{clearance_level}", query, text,
             prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
             total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
-            client=ACTIVE_CLIENT,
+            client=ACTIVE_CLIENT, actor=actor,
         ))
         return text, meter, False, 0
     except Exception as e:
         asyncio.create_task(log_query(f"{platform}_{clearance_level}", query,
-                                      f"ERROR: {e}", client=ACTIVE_CLIENT))
+                                      f"ERROR: {e}", client=ACTIVE_CLIENT, actor=actor))
         return f"I encountered a cognitive error while processing that request: {e}", meter, False, 0
 
 
 async def answer_stream(query: str, clearance_level: str, platform: str,
-                        upload_token: str = ""):
+                        upload_token: str = "", actor: str = None):
     """Async token generator for /chat (Web UI). Yields raw text chunks; the
-    endpoint wraps each into the SSE `data: {"chunk": ...}` envelope."""
+    endpoint wraps each into the SSE `data: {"chunk": ...}` envelope.
+
+    `actor` is recorded in the audit trail and used for nothing else — clearance was
+    already decided from the API key before this is called."""
     if global_index is None:
         yield "System Offline: AI Core is booting or missing API keys."
         return
@@ -996,7 +1002,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str,
             prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
             total_tokens=meter.total_tokens, estimated_saved_tokens=saved,
             token_source=meter.source if meter.total_tokens else "gate", gated=True,
-            client=ACTIVE_CLIENT,
+            client=ACTIVE_CLIENT, actor=actor,
         ))
         yield ESCALATION_LINE
         return
@@ -1054,7 +1060,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str,
             (delivered + "\n\n" + text).strip() if delivered else text,
             prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
             total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
-            client=ACTIVE_CLIENT,
+            client=ACTIVE_CLIENT, actor=actor,
         ))
         fallback_handled = True
         return
@@ -1069,7 +1075,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str,
                     f"{platform}_{clearance_level}", query, full,
                     prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
                     total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
-                    client=ACTIVE_CLIENT,
+                    client=ACTIVE_CLIENT, actor=actor,
                 ))
 
 
@@ -1146,7 +1152,8 @@ def clients(x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_H
 async def chat(request: QueryRequest,
                x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
                authorization: str | None = Header(default=None),
-               x_upload_token: str | None = Header(default=None)):
+               x_upload_token: str | None = Header(default=None),
+               x_actor: str | None = Header(default=None, alias=authmod.ACTOR_HEADER)):
     """Web UI endpoint — Server-Sent Events. Emits `data: {"chunk": "..."}\\n\\n`
     per token and a terminating `data: [DONE]\\n\\n`.
 
@@ -1157,6 +1164,9 @@ async def chat(request: QueryRequest,
         raise HTTPException(status_code=500, detail="Agent not initialized.")
     role = _authed_role(x_api_key, authorization)
     clearance = _clearance_for(role, request.clearance_level)
+    # WHO, for the audit trail only. Resolved AFTER the key decided the clearance
+    # above, so it cannot influence it.
+    actor = authmod.clean_actor(x_actor)
     try:
         resolve_request_client(request.client)
     except ValueError as e:
@@ -1166,7 +1176,7 @@ async def chat(request: QueryRequest,
         try:
             async for piece in answer_stream(
                 request.query, clearance, request.platform,
-                upload_token=x_upload_token or "",
+                upload_token=x_upload_token or "", actor=actor,
             ):
                 yield f"data: {json.dumps({'chunk': piece})}\n\n"
             yield "data: [DONE]\n\n"
@@ -1186,7 +1196,8 @@ async def chat(request: QueryRequest,
 async def n8n_rag_endpoint(request: QueryRequest,
                            x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
                            authorization: str | None = Header(default=None),
-                           x_upload_token: str | None = Header(default=None)):
+                           x_upload_token: str | None = Header(default=None),
+                           x_actor: str | None = Header(default=None, alias=authmod.ACTOR_HEADER)):
     """n8n orchestration endpoint — strict JSON in, strict JSON out.
     Returns `{"status": "success", "response": "..."}`.
 
@@ -1196,11 +1207,13 @@ async def n8n_rag_endpoint(request: QueryRequest,
         raise HTTPException(status_code=500, detail="Agent not initialized.")
     role = _authed_role(x_api_key, authorization)
     clearance = _clearance_for(role, request.clearance_level)
+    # WHO, for the audit trail only — resolved after the key decided clearance.
+    actor = authmod.clean_actor(x_actor)
     try:
         resolve_request_client(request.client)
         response_text, meter, gated, saved = await answer_once(
             request.query, clearance, request.platform,
-            upload_token=x_upload_token or "",
+            upload_token=x_upload_token or "", actor=actor,
         )
         headers = {
             "X-Prompt-Tokens": str(meter.prompt_tokens),
