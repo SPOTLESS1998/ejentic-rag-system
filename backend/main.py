@@ -212,6 +212,21 @@ PINECONE_NAMESPACE = CFG["namespace"]
 # --- Tunables: client config wins, env override wins over that (quick runs) -
 LLM_MODEL = os.environ.get("LLM_MODEL") or CFG["llm_model"]
 LLM_TIMEOUT = float(os.environ.get("LLM_TIMEOUT") or os.environ.get("LLM_REQUEST_TIMEOUT") or "300")
+
+# Extra kwargs the LLM client needs ONLY when the provider-swap escape hatch is in
+# use (LLM_BASE_URL set). Empty otherwise, so the NVIDIA hosted path is untouched.
+#
+# WHY is_chat_model IS LOAD-BEARING
+# ---------------------------------
+# The NVIDIA client decides chat-vs-completion by looking the model name up in its
+# own table of known NVIDIA models. A swapped-in provider's name (e.g. Gemini's
+# "models/gemini-flash-latest") is not in that table, so the check defaults to
+# False and every call is sent to the LEGACY /completions endpoint with the
+# messages flattened into one "user: ...\nassistant: " string. OpenAI-compatible
+# providers generally implement /chat/completions and NOT /completions, so the
+# result is a hard 404 — which the retry wrapper reports as a transient upstream
+# error, making a permanent misconfiguration look like a flaky endpoint.
+LLM_SWAP_KWARGS = {"is_chat_model": True} if os.environ.get("LLM_BASE_URL") else {}
 EMBED_MODEL = os.environ.get("EMBED_MODEL") or CFG["embed_model"]
 RERANK_MODEL = os.environ.get("RERANK_MODEL") or CFG["rerank_model"]  # only used when RERANK_TRY_NVIDIA=true (e.g. self-hosted NIM)
 
@@ -527,6 +542,7 @@ else:
                 api_key=os.environ.get("LLM_API_KEY") or NVIDIA_API_KEY,
                 timeout=LLM_TIMEOUT,
                 base_url=os.environ.get("LLM_BASE_URL") or None,
+                **LLM_SWAP_KWARGS,
             )
             print(f"[llm] {LLM_MODEL} initialized (attempt {attempt}).")
             last_err = None

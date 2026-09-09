@@ -6,7 +6,7 @@
   "namespace": "ejentic-internal",
   "embed_model": "nvidia/nemotron-3-embed-1b",
   "embed_dim": 2048,
-  "llm_model": "models/gemini-flash-latest",
+  "llm_model": "models/gemini-flash-lite-latest",
   "rerank_model": "nvidia/nv-rerankqa-mistral-4b-v3",
   "retrieve_top_k": 10,
   "rerank_top_n": 4,

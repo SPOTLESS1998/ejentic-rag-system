@@ -37,6 +37,7 @@ Exit codes:  0 = all good   1 = below --min-pass   2 = a clearance leak (loudest
 import argparse
 import asyncio
 import json
+import os
 import re
 import sys
 
@@ -107,10 +108,20 @@ def _parse_verdict(content: str) -> tuple:
 
 
 def _build_judge_llm():
-    """A dedicated temperature-0 judge for stable, repeatable grading. Falls back
-    to the system LLM if a temp-0 instance can't be constructed."""
+    """A dedicated temperature-0 judge for stable, repeatable grading. Routes through
+    the SAME provider-swap as the system LLM (LLM_BASE_URL / LLM_API_KEY, plus
+    main.LLM_SWAP_KWARGS) so the judge cannot silently stay pinned to a degraded
+    NVIDIA endpoint while the answers it is grading run on the swapped-in provider —
+    that would ERROR every correctness case and read as "couldn't verify" rather than
+    a real grade. Falls back to the system LLM if a temp-0 instance can't be built."""
     try:
-        return main.NVIDIA(model=main.LLM_MODEL, api_key=main.NVIDIA_API_KEY, temperature=0.0)
+        return main.NVIDIA(
+            model=main.LLM_MODEL,
+            api_key=os.environ.get("LLM_API_KEY") or main.NVIDIA_API_KEY,
+            base_url=os.environ.get("LLM_BASE_URL") or None,
+            temperature=0.0,
+            **main.LLM_SWAP_KWARGS,
+        )
     except Exception as exc:  # noqa: BLE001 - any init failure -> reuse system LLM
         print(f"[judge] temp-0 init failed ({exc}); reusing system LLM.")
         return main.Settings.llm
