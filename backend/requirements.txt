@@ -60,6 +60,15 @@ sentence-transformers==3.4.1
 # where that line would not apply. This is the De Morgan equivalent and is valid.
 # It cost a failed production image build to find, because a requirements file that
 # has never been installed from is a hypothesis, not a fact.
+# The Linux line was `torch>=2.5` — the ONLY unpinned line in this file, and the
+# one that could hurt most. deploy/ejentic-rag.service rebuilds the image on every
+# boot (ExecStartPre), so an open range means a reboot can silently install a
+# different torch than the one this system was verified on — against a
+# sentence-transformers that is deliberately pinned to the 3.x line just above.
+# Nothing in git would explain the resulting breakage, which is exactly the
+# failure this file's header was written to prevent. Pinned 2026-09-10 to the
+# version the live container is actually running (torch 2.14.0+cu130, confirmed
+# in production), so a boot-time rebuild reproduces the verified image.
 torch==2.2.2;   sys_platform == "darwin" and platform_machine == "x86_64"
 numpy==1.26.4;  sys_platform == "darwin" and platform_machine == "x86_64"
-torch>=2.5;     sys_platform != "darwin" or platform_machine != "x86_64"
+torch==2.14.0;  sys_platform != "darwin" or platform_machine != "x86_64"

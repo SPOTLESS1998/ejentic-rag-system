@@ -492,22 +492,79 @@ strong operational record, not forensic evidence.
 
 ### Deploying a change
 
+⚠️ **First check what `/opt/ejentic-rag` actually is on your box** — the two update paths are not
+interchangeable, and picking the wrong one silently deploys nothing:
+
+```bash
+cd /opt/ejentic-rag && git rev-parse --is-inside-work-tree 2>/dev/null \
+  && echo "GIT CHECKOUT -> use path A" \
+  || echo "FILE COPY -> use path B"
+```
+
+**Path A — it is a git checkout:**
+
 ```bash
 cd /opt/ejentic-rag && git pull
 sudo systemctl restart ejentic-rag     # the unit's ExecStartPre rebuilds first
 ```
 
+**Path B — it is a plain file copy** (this is how the first production box was set up, verified
+2026-09-10: there is no `.git` there, so `git pull` fails with *"not a git repository"* and you will
+restart onto unchanged code while believing you shipped). Push from your workstation, then restart:
+
+```bash
+# from the repo root on your machine — note the trailing slashes
+rsync -av --delete \
+  --exclude '.git' --exclude 'venv' --exclude 'node_modules' \
+  --exclude '.next' --exclude '.env' --exclude 'data' \
+  ./ ubuntu@<server>:/opt/ejentic-rag/
+ssh ubuntu@<server> 'sudo systemctl restart ejentic-rag'
+```
+
+`--delete` is what makes a *removed* file actually disappear on the server; without it, a file you
+deleted in git keeps running in production. The excludes matter as much: copying `.env` would put
+secrets inside the git-adjacent tree the `.dockerignore` files exist to keep them out of, and copying
+`data` would overwrite the live audit trail with whatever is on your laptop.
+
+**Converting Path B to Path A** is worth doing (it makes rollback trivial — see below), but the repo
+is private, so the server needs its own **fresh** read-only deploy key added to the GitHub repo.
+That is a credential decision for the repo owner, not something to improvise on the box.
+
 The rebuild is in the unit deliberately. A `restart` that skips it serves the old image from a new
 checkout — which is how this project once had a stale build answering on `:8002` for 25 hours while
 the fixed code sat unused on disk.
 
+⏱️ **Budget ~10-15 minutes for the restart, not seconds.** `ExecStartPre` is a real `docker compose
+build`: measured 2026-09-10 on the live box, the backend's `pip install` step alone took **362 s** and
+the whole build ran past **10 minutes**, because torch and its CUDA wheels are reinstalled rather than
+cached. `TimeoutStartSec=900` is the ceiling — if a build ever exceeds it systemd kills the start and
+`Restart=always` retries, which loops. The site itself stays up through this (`restart: unless-stopped`
+means Docker keeps the *existing* containers running until the new images are ready), but do not
+schedule a restart expecting it to be instant.
+
 ### Rolling back
+
+**Path A (git checkout):**
 
 ```bash
 cd /opt/ejentic-rag && git log --oneline -10
 git checkout <known-good-sha>
 sudo systemctl restart ejentic-rag
 ```
+
+**Path B (file copy)** has no history on the server, so the fastest rollback is the *previous image*,
+which Docker still holds until you prune it:
+
+```bash
+sudo docker images ejentic-rag-backend --format '{{.ID}}  {{.CreatedSince}}  {{.Size}}'
+sudo docker tag <previous-image-id> ejentic-rag-backend:latest
+cd /opt/ejentic-rag && sudo bash -c 'set -a; . /etc/ejentic-rag/server.env; set +a; \
+  docker compose -f docker-compose.prod.yml up -d --no-build'
+```
+
+`--no-build` is the load-bearing flag — without it compose rebuilds and you land straight back on the
+code you were trying to roll away from. This is also why you should not `docker image prune -a`
+immediately after a deploy: that previous image *is* your rollback.
 
 The audit DB is on a named volume (`rag_data`), so it is untouched by rollbacks and by
 `docker compose down`. Only `docker compose down -v` destroys it — which is also the only way to

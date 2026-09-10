@@ -29,6 +29,12 @@ knowledge_from_docs.json
 
 # --- Eval run artifact (regenerated each run; eval_cases.json IS tracked) ---
 eval_report.json
+# Dated safety copies taken before a risky re-run (e.g. the 2026-09-09 clean 19/19
+# kept while the Gemini swap was being proven). Same reasoning as eval_report.json:
+# a local artifact of one run, not source. The tracked source of truth for what the
+# eval asserts is eval_cases.json.
+eval_report.*.json
+eval_report.CLEAN-BACKUP-*.json
 
 # --- OS noise ---
 .DS_Store
