@@ -17,6 +17,7 @@
   "query_rewrite_enabled": true,
   "chunk_size": 500,
   "chunk_overlap": 50,
+  "clearance_tags": ["public", "internal", "executive"],
   "clearance_levels": {
     "guest": ["public"],
     "employee": ["public", "internal"],

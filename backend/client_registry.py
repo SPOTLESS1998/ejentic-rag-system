@@ -176,6 +176,34 @@ def _validate(cfg: dict, source: str) -> None:
     for role, tags in cl.items():
         if not isinstance(tags, (list, str)):
             _fatal(f"{source}: clearance_levels[{role!r}] must be a list or '*'")
+
+    # `clearance_tags` is OPTIONAL: absent means "derive the vocabulary from the
+    # role map" (the original behaviour, kept for tenants that have no wildcard
+    # role). When declared it becomes the vocabulary ingestion validates against,
+    # so a malformed declaration must fail HERE — at config load, before any
+    # ingestion can act on it — not halfway through a namespace rebuild.
+    declared = cfg.get("clearance_tags")
+    if declared is not None:
+        if not isinstance(declared, list) or not declared:
+            _fatal(f"{source}: 'clearance_tags' must be a non-empty list of tag names")
+        clean = set()
+        for tag in declared:
+            if not isinstance(tag, str) or not tag.strip():
+                _fatal(f"{source}: 'clearance_tags' contains a non-string/empty tag: {tag!r}")
+            clean.add(tag.strip())
+        # A declared vocabulary that omits a tag some role is granted would reject
+        # content that role is entitled to read — a silent hole in the tenant's
+        # knowledge base. Cheap to check, impossible to debug later.
+        named = {
+            t.strip() for tags in cl.values() if isinstance(tags, list)
+            for t in tags if isinstance(t, str) and t.strip()
+        }
+        gap = sorted(named - clean)
+        if gap:
+            _fatal(
+                f"{source}: 'clearance_tags' omits {gap}, which clearance_levels "
+                f"grants to a role — every tag a role can read must be declared"
+            )
     for num in ("retrieve_top_k", "rerank_top_n", "max_context_chars",
                 "embed_dim", "chunk_size", "chunk_overlap"):
         if not isinstance(cfg[num], int) or cfg[num] <= 0:
@@ -255,16 +283,46 @@ def _validate_auth(cfg: dict, source: str) -> None:
 
 
 def tenant_clearance_tags(cfg: dict) -> list:
-    """Every stored `clearance` tag this tenant's roles can refer to.
+    """Every stored `clearance` tag this tenant's content may carry.
 
     ONE SOURCE OF TRUTH for the tag vocabulary, shared by retrieval and ingestion.
     Ingestion used to hardcode {"public","internal","executive"}, so a tenant whose
     tiers are e.g. partner/legal could not ingest without editing Python — exactly
     the kind of business fact MULTITENANCY.md forbids in code.
 
-    A wildcard role ("*") grants everything and therefore names no tag of its own,
-    so it contributes nothing here; the tags come from the explicit lists.
+    Two sources, in order:
+
+    1. An explicit `clearance_tags` list on the tenant's config. PREFERRED, and
+       `_validate` proves it covers every tag the role map names.
+    2. Otherwise, derived from the explicit role -> tag lists in
+       `clearance_levels`.
+
+    WHY THE EXPLICIT FORM EXISTS (found 2026-09-11 by actually running ingestion
+    against production): deriving the vocabulary CANNOT see a tag that only a
+    wildcard role can read. Our own `clearance_levels` maps
+    `"executive": "*"`, which `build_clearance_filter` turns into "no filter at
+    all" — so the `executive` TAG is served correctly by retrieval while being
+    named nowhere in the config. Derivation therefore returned
+    ["public", "internal"], and ingesting the very corpus that was already
+    deployed failed with "record #8 has invalid clearance 'executive'". The
+    deployed index had been un-re-ingestable for five days and nothing surfaced
+    it, because ingestion is rare and the fail-closed check only fires then.
+
+    🧠 Generalisable: a wildcard is a convenient way to say "sees everything",
+    but it destroys information — you can no longer enumerate what "everything"
+    is. Anything that needs the full vocabulary must be told it explicitly.
     """
+    declared = cfg.get("clearance_tags")
+    if isinstance(declared, list) and declared:
+        seen, out = set(), []
+        for tag in declared:
+            t = tag.strip() if isinstance(tag, str) else ""
+            if t and t not in seen:
+                seen.add(t)
+                out.append(t)
+        if out:
+            return out
+
     seen, out = set(), []
     for tags in (cfg.get("clearance_levels") or {}).values():
         if not isinstance(tags, list):

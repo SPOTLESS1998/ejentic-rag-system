@@ -126,6 +126,59 @@ finally:
         shutil.rmtree(BACKEND / "data" / tmp_client, ignore_errors=True)
 
 # ---------------------------------------------------------------------------
+section("a WILDCARD role does not hide its tags from the vocabulary")
+# ---------------------------------------------------------------------------
+# REGRESSION, found 2026-09-11 by running ingestion against production. Deriving
+# the tag vocabulary from the role map cannot see a tag that only a wildcard role
+# reads: our own map is {"executive": "*"}, which build_clearance_filter turns
+# into "no filter", so the `executive` TAG is served by retrieval while appearing
+# nowhere in the config. Derivation returned ["public","internal"], and ingesting
+# the corpus that was ALREADY DEPLOYED failed with "record #8 has invalid
+# clearance 'executive'". The index had been un-re-ingestable for five days.
+# Fix: an explicit `clearance_tags` declaration, proven complete by _validate.
+import copy  # noqa: E402
+
+_ej = registry.get_client("ejentic")
+check("ejentic declares its tag vocabulary explicitly",
+      isinstance(_ej.get("clearance_tags"), list) and _ej["clearance_tags"])
+check("the executive tag IS in the vocabulary (the bug)",
+      "executive" in registry.tenant_clearance_tags(_ej),
+      str(registry.tenant_clearance_tags(_ej)))
+check("vocabulary is exactly the three declared tags",
+      registry.tenant_clearance_tags(_ej) == ["public", "internal", "executive"],
+      str(registry.tenant_clearance_tags(_ej)))
+
+# Backward compatibility: a tenant with no declaration keeps deriving.
+_legacy = copy.deepcopy(_ej)
+_legacy.pop("clearance_tags", None)
+check("no declaration still derives from the role map",
+      registry.tenant_clearance_tags(_legacy) == ["public", "internal"],
+      str(registry.tenant_clearance_tags(_legacy)))
+
+# A declared vocabulary that omits a tag some role is GRANTED would silently
+# reject content that role is entitled to read, so it must die at config load.
+def _validates(c):
+    try:
+        registry._validate(c, "test")
+        return True
+    except SystemExit:
+        return False
+
+_gap = copy.deepcopy(_ej)
+_gap["clearance_tags"] = ["public", "executive"]        # drops 'internal'
+check("declaring a vocabulary that omits a granted tag is REFUSED",
+      not _validates(_gap))
+for _bad, _label in (([], "empty list"),
+                     (["public", "internal", "executive", ""], "empty-string tag"),
+                     ("public,internal", "a string instead of a list")):
+    _c = copy.deepcopy(_ej)
+    _c["clearance_tags"] = _bad
+    check(f"clearance_tags as {_label} is REFUSED", not _validates(_c))
+check("the real ejentic config still validates", _validates(copy.deepcopy(_ej)))
+check("a typo'd tag is still outside the vocabulary (ingestion fails closed)",
+      "exective" not in registry.tenant_clearance_tags(_ej))
+
+# ---------------------------------------------------------------------------
 section("every audit row is tenant-STAMPED, and every read filters on it")
 # ---------------------------------------------------------------------------
 # Belt and suspenders: the path keeps tenants apart on disk, and the column means
