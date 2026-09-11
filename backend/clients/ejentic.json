@@ -26,6 +26,7 @@
   "persona_name": "Ejentic Customer Success Agent",
   "persona_style": "professional, precise, and premium in tone",
   "escalation_line": "I don't have that information in my knowledge base. You can reach the Ejentic team directly at mail@ejentic.xyz, on WhatsApp at +234 811 411 3800, or through the contact form at https://ejentic.xyz/contact.",
+  "greeting_reply": "Hello. Ask me anything about Ejentic within your clearance — our services and agent products, how we work with clients, our blog and demos, or how to get in touch. I answer from Ejentic's knowledge base and cite my sources.",
   "auth": {
     "required": true,
     "keys": {

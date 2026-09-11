@@ -92,6 +92,15 @@ def base_cfg(**overrides) -> dict:
     cfg["auth"] = {k: (dict(v) if isinstance(v, dict) else v)
                    for k, v in (cfg.get("auth") or {}).items()}
     cfg.update(overrides)
+    # Mirror the one merge rule that a plain dict.update() cannot express:
+    # client_registry._merge drops an inherited `clearance_tags` when a tenant
+    # declares its own `clearance_levels`, because whoever owns the role map
+    # owns the vocabulary. Without this, a fixture that overrides the role map
+    # keeps ejentic's tags and every tag-vocabulary test measures a config that
+    # could never exist in production. _merge remains the source of truth; this
+    # only keeps the fixture honest about it.
+    if "clearance_levels" in overrides and "clearance_tags" not in overrides:
+        cfg.pop("clearance_tags", None)
     return cfg
 
 

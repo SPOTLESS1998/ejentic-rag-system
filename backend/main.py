@@ -252,6 +252,32 @@ ESCALATION_LINE = os.environ.get("ESCALATION_LINE") or CFG["escalation_line"]
 PERSONA_NAME = CFG["persona_name"]
 PERSONA_STYLE = CFG["persona_style"]
 
+# A greeting is not a knowledge question, but it used to be treated as one:
+# "hello" went through retrieval, matched nothing, and the confidence gate
+# correctly returned the escalation line — so the FIRST thing nearly every
+# visitor types got "I don't have that information in my knowledge base",
+# which reads as a broken bot. Found 2026-09-11 in the first real browser
+# session, which is also the only place it could have been found.
+GREETING_REPLY = os.environ.get("GREETING_REPLY") or CFG.get("greeting_reply") or (
+    f"Hello. I am the {PERSONA_NAME}. Ask me about Ejentic — our services, how we "
+    "work with clients, our blog, or how to get in touch — and I will answer from "
+    "the knowledge base, with sources."
+)
+
+# EXACT-match allowlist, deliberately NOT a prefix or substring test.
+# "hello" short-circuits; "hello, what was Q2 revenue?" does NOT match and goes
+# through the normal clearance-filtered path. A substring test here would have
+# been a genuine bypass: prefixing any question with "hi" would skip retrieval,
+# and a short-circuit that skips retrieval also skips the clearance filter.
+# Keep every entry a bare pleasantry that carries no question.
+_GREETINGS = frozenset({
+    "hi", "hello", "hey", "heya", "hiya", "yo", "howdy", "hullo", "hei",
+    "hi there", "hello there", "hey there", "hello hi",
+    "good morning", "good afternoon", "good evening", "good day",
+    "greetings", "how are you", "how are you doing", "how do you do",
+    "sup", "whats up", "what's up", "wassup",
+})
+
 GROUNDING_SYSTEM_PROMPT = (
     f"You are the {PERSONA_NAME} — {PERSONA_STYLE}. You answer ONLY from the numbered "
     "context passages provided. You must cite the sources you use inline as [Source N]. "
@@ -878,6 +904,30 @@ def _passes_confidence(nodes, max_raw_score: float) -> bool:
     return bool(nodes) and max_raw_score >= CONFIDENCE_THRESHOLD
 
 
+def _is_greeting(question: str) -> bool:
+    """True ONLY for a bare social greeting — never a greeting plus a question.
+
+    Normalises case, surrounding whitespace and surrounding punctuation, then
+    requires an EXACT match against `_GREETINGS`. The length cap is a second
+    belt: even if some long string normalised into the set, it could not be
+    carrying a smuggled question.
+
+    🔒 This is the one place in the request path that returns text WITHOUT
+    consulting the index, so it must be impossible to route a real question
+    through it. Exact matching is what guarantees that — a substring or
+    `startswith` test would let "hi, what was Q2 revenue?" skip retrieval, and
+    skipping retrieval means skipping the clearance filter. The reply is a
+    static string built from config; no retrieved content can reach it.
+    """
+    if not isinstance(question, str):
+        return False
+    q = question.strip().lower()
+    if not q or len(q) > 32:          # a greeting is short; a question is not
+        return False
+    q = " ".join(q.strip(" \t\r\n.!?,;:~-–—*\"'`").split())
+    return q in _GREETINGS
+
+
 _ASSISTANT_MARKER = "assistant:"
 
 
@@ -972,6 +1022,16 @@ async def answer_once(query: str, clearance_level: str, platform: str,
     meter = TokenMeter()
     if global_index is None:
         return "System Offline: AI Core is booting or missing API keys.", meter, False, 0
+    # Greet before retrieving. Costs no embedding call, no rerank and no LLM
+    # call. Logged with a [GREETING] marker so the audit trail stays complete,
+    # but gated=False on purpose: `gated` measures the CONFIDENCE gate, and
+    # counting greetings there would quietly corrupt that metric.
+    if _is_greeting(query):
+        asyncio.create_task(log_query(
+            f"{platform}_{clearance_level}", query, "[GREETING] " + GREETING_REPLY,
+            client=ACTIVE_CLIENT, actor=actor,
+        ))
+        return GREETING_REPLY, meter, False, 0
     try:
         nodes, max_score, _ = await retrieve_and_rerank(
             query, clearance_level, meter=meter, upload_token=upload_token)
@@ -1014,6 +1074,15 @@ async def answer_stream(query: str, clearance_level: str, platform: str,
     already decided from the API key before this is called."""
     if global_index is None:
         yield "System Offline: AI Core is booting or missing API keys."
+        return
+
+    # Same short-circuit as answer_once — see the note there on why gated=False.
+    if _is_greeting(query):
+        asyncio.create_task(log_query(
+            f"{platform}_{clearance_level}", query, "[GREETING] " + GREETING_REPLY,
+            client=ACTIVE_CLIENT, actor=actor,
+        ))
+        yield GREETING_REPLY
         return
 
     meter = TokenMeter()

@@ -149,6 +149,15 @@ def _merge(base: dict, override: dict) -> dict:
             role: (list(tags) if isinstance(tags, list) else tags)
             for role, tags in override["clearance_levels"].items()
         }
+        # `clearance_tags` follows `clearance_levels` for the SAME reason that
+        # map is replaced rather than merged: a tenant declaring its own roles
+        # would otherwise inherit OUR tag vocabulary (public/internal/executive)
+        # — a vocabulary they never asked for. That inherited list then either
+        # validates their content against the wrong tags or, more likely, trips
+        # the completeness check and refuses to boot with a message about tags
+        # they never wrote. Whoever owns the role map owns the vocabulary.
+        if "clearance_tags" not in override:
+            out.pop("clearance_tags", None)
     else:
         out["clearance_levels"] = {
             role: (list(tags) if isinstance(tags, list) else tags)
