@@ -1,43 +1,122 @@
 [
-    {
-        "text": "Ejentic AI is a premier Enterprise AI agency dedicated to building advanced, scalable, and secure agentic workflows for modern businesses. We specialize in Retrieval-Augmented Generation (RAG), Autonomous AI Agents, and AI-driven lead generation pipelines.",
-        "clearance": "public"
-    },
-    {
-        "text": "Core Offer 1: The Ejentic AI Knowledge Core. This is a fully managed, enterprise-grade hybrid RAG system designed to securely index your company's entire internal knowledge base. It uses Pinecone for vector storage and supports both cloud and on-premise deployments.",
-        "clearance": "public"
-    },
-    {
-        "text": "Core Offer 2: Autonomous HR & Customer Success Agents. We build bespoke AI agents capable of replacing level-1 support and internal HR ticketing. These agents feature deep tool integration, meaning they can query SQL databases, send emails, and schedule meetings autonomously.",
-        "clearance": "public"
-    },
-    {
-        "text": "Core Offer 3: The Ejentic Lead Generation System. An AI-powered pipeline that sources, qualifies, and enriches business prospects automatically, then feeds them into outreach workflows. It combines agentic research with CRM and email tool integration to keep the sales funnel full without manual prospecting.",
-        "clearance": "public"
-    },
-    {
-        "text": "Core Offer 4: AI Consulting & Team Enablement. Ejentic AI offers advisory engagements that help companies adopt agentic AI with confidence. We assess your workflows, identify high-impact automation opportunities, and enable your team to build and operate AI agents safely.",
-        "clearance": "public"
-    },
-    {
-        "text": "Ejentic AI Technical Expertise: Our tech stack relies heavily on Python, FastAPI, Next.js for frontends, Pinecone for vector DBs, and LlamaIndex for orchestration. We primarily leverage NVIDIA NIM microservices and Mistral Nemotron models for maximum reasoning efficiency.",
-        "clearance": "public"
-    },
-    {
-        "text": "SAMPLE DEMO DATA (fictional): Ejentic AI Employee Handbook: Core Hours are 10:00 AM to 3:00 PM EST. All employees are required to use 1Password for credential management. The corporate VPN must be active when accessing staging environments.",
-        "clearance": "internal"
-    },
-    {
-        "text": "SAMPLE DEMO DATA (fictional): Internal Project Delta: Ejentic AI is currently developing a secret project named Delta, which aims to create a fully autonomous coding agent capable of resolving 50% of GitHub issues without human intervention. ETA for beta release is Q4 2026.",
-        "clearance": "internal"
-    },
-    {
-        "text": "SAMPLE DEMO DATA (fictional): Executive Financial Data Q2: The Ejentic AI Knowledge Core generated $2.4M in recurring revenue. The total operating expenses for cloud infrastructure were $310k. We are projecting a 40% growth in Q3 due to the new NVIDIA partnership.",
-        "clearance": "executive"
-    },
-    {
-        "text": "SAMPLE DEMO DATA (fictional): Executive Strategy 2027: The executive board has approved a potential acquisition target, 'OmniScrape Solutions', to bolster our data ingestion capabilities using Firecrawl. The maximum bid authorized is $12M.",
-        "clearance": "executive"
-    }
+  {
+    "text": "Ejentic AI is a premier Enterprise AI agency dedicated to building advanced, scalable, and secure agentic workflows for modern businesses. We specialize in Retrieval-Augmented Generation (RAG), Autonomous AI Agents, and AI-driven lead generation pipelines.",
+    "clearance": "public"
+  },
+  {
+    "text": "Core Offer 1: The Ejentic AI Knowledge Core. This is a fully managed, enterprise-grade hybrid RAG system designed to securely index your company's entire internal knowledge base. It uses Pinecone for vector storage and supports both cloud and on-premise deployments.",
+    "clearance": "public"
+  },
+  {
+    "text": "Core Offer 2: Autonomous HR & Customer Success Agents. We build bespoke AI agents capable of replacing level-1 support and internal HR ticketing. These agents feature deep tool integration, meaning they can query SQL databases, send emails, and schedule meetings autonomously.",
+    "clearance": "public"
+  },
+  {
+    "text": "Core Offer 3: The Ejentic Lead Generation System. An AI-powered pipeline that sources, qualifies, and enriches business prospects automatically, then feeds them into outreach workflows. It combines agentic research with CRM and email tool integration to keep the sales funnel full without manual prospecting.",
+    "clearance": "public"
+  },
+  {
+    "text": "Core Offer 4: AI Consulting & Team Enablement. Ejentic AI offers advisory engagements that help companies adopt agentic AI with confidence. We assess your workflows, identify high-impact automation opportunities, and enable your team to build and operate AI agents safely.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic AI Technical Expertise: Our tech stack relies heavily on Python, FastAPI, Next.js for frontends, Pinecone for vector DBs, and LlamaIndex for orchestration. We primarily leverage NVIDIA NIM microservices and Mistral Nemotron models for maximum reasoning efficiency.",
+    "clearance": "public"
+  },
+  {
+    "text": "SAMPLE DEMO DATA (fictional): Ejentic AI Employee Handbook: Core Hours are 10:00 AM to 3:00 PM EST. All employees are required to use 1Password for credential management. The corporate VPN must be active when accessing staging environments.",
+    "clearance": "internal"
+  },
+  {
+    "text": "SAMPLE DEMO DATA (fictional): Internal Project Delta: Ejentic AI is currently developing a secret project named Delta, which aims to create a fully autonomous coding agent capable of resolving 50% of GitHub issues without human intervention. ETA for beta release is Q4 2026.",
+    "clearance": "internal"
+  },
+  {
+    "text": "SAMPLE DEMO DATA (fictional): Executive Financial Data Q2: The Ejentic AI Knowledge Core generated $2.4M in recurring revenue. The total operating expenses for cloud infrastructure were $310k. We are projecting a 40% growth in Q3 due to the new NVIDIA partnership.",
+    "clearance": "executive"
+  },
+  {
+    "text": "SAMPLE DEMO DATA (fictional): Executive Strategy 2027: The executive board has approved a potential acquisition target, 'OmniScrape Solutions', to bolster our data ingestion capabilities using Firecrawl. The maximum bid authorized is $12M.",
+    "clearance": "executive"
+  },
+  {
+    "text": "Ejentic's live website is https://ejentic.xyz. Its public sections are: the home page (company overview and services) at /, Services at /#services, About (\"Who We Are\") at /about, Research at /research, Demos at /demos, the AI Insights Blog at /blog, Ejentic Academy at /academy, and Get in Touch / Contact at /contact. Legal pages are Privacy Policy at /privacy, Terms of Service at /terms, and Security & Compliance at /security. The company tagline is \"Own the workforce of the future\", under the positioning \"Bespoke AI engineering\".",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic services overview (complete list). Ejentic builds custom AI agents, automations and Retrieval-Augmented Generation (RAG) systems that perform work under client supervision. The five current areas of expertise are: (1) AI agents - autonomous, conversational agents that interact with customers 24/7; (2) Automations - automating recurring workflows and integrating systems; (3) RAG systems - enterprise-grade Retrieval-Augmented Generation grounded in a private knowledge base for accurate, secure, context-aware answers; (4) Consultation - strategic guidance on AI implementation; (5) Research - problem-solving through AI research and global collaborations. Three ready-to-deploy agent products are offered: the Lead Generation System, the Support Specialist, and the Data Analyst. Listed as coming soon, not yet available: Web & App Development, Auditing, Finance, Academy, and Cybersecurity.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic's Lead Generation System is a ready-to-deploy agent product acting as a Sales Development Representative (SDR). It is a sequence of agents that identifies target companies, qualifies them, drafts outreach and books the meeting - running outbound end to end. Rather than one large model, it is a chain of single-job agents: The Scout finds the companies worth calling; The Profiler adds the people and the buying signals; The Qualifier scores the fit and drops the rest; The Writer writes and sends the approach; The Scheduler books the meeting, not just a lead. It takes a name on a list through to a calendar booking.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic's Support Specialist is a ready-to-deploy customer service agent. It is multilingual, greets website visitors, explains the business offering and captures the lead. Positioned as autonomous support, it handles Tier-1 support fully: it authenticates the customer, answers the question, and closes the ticket with no human in the loop.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic's Data Analyst is a ready-to-deploy agent for research-based business intelligence. It hooks into a company's internal databases and researches outward from them - the reasoning being that without existing internal knowledge, the system would not know what to look for. It runs queries and returns findings on demand.",
+    "clearance": "public"
+  },
+  {
+    "text": "What Ejentic's agents complete. Ejentic frames its work as closing the capacity gap with agents that finish the work rather than just routing it. Three outcomes: Resolves - Tier-1 support handled fully, authenticating the customer, answering and closing the ticket. Sources - finds accounts, scores fit, writes outreach and books meetings instead of just producing leads. Answers - reads the client's documents and replies with the source attached, so claims are verifiable. The problem Ejentic describes: skilled staff absorb repetitive work by default - support reps resetting passwords, nurses retyping conversations into forms, paralegals reading boilerplate for one clause - all billable time spent off-mission. The solution: agents that hold context and finish the task, so the specialist reviews output rather than producing it.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic's mission is \"to dive deep into the uncertain waters of artificial intelligence in search of treasure for the betterment of our people.\" The company states it reports what it finds, educates as it goes, and puts AI to work wherever it clears a real bottleneck for business or society. Its vision is that \"Africa has what it takes to lead the world in every endeavour\", and the company says it believes it all starts with Nigeria, joining forces with existing trailblazers to realise that potential. Its stated positioning is \"your trusted navigator for AI transformation.\"",
+    "clearance": "public"
+  },
+  {
+    "text": "The Ejentic Naturalistic Lens is Ejentic's methodology. Every engagement begins by studying how the client's operation genuinely behaves before changing anything - described as \"closer to gardening than engineering.\" The first three of its six pillars: (1) Holistic Diagnosis (root cause analysis) - examine how the business truly operates before coding, because the loudest problem usually isn't the real one and automating it just makes the mess faster. (2) Data Nurturing (soil quality) - AI is only as good as what you feed it, so existing data is reviewed, cleaned where needed, and gaps closed before anything is trained. (3) Adaptogenic AI (resilience and adaptation) - traffic surges, changing formats and unpredictable customer input are accounted for from the outset, so the system bends under load instead of breaking.",
+    "clearance": "public"
+  },
+  {
+    "text": "The Ejentic Naturalistic Lens, pillars four to six: (4) Synergistic Blends (integrated solutions) - scattered chatbots, automations and models are how tool sprawl begins, so components are joined into a single workflow staff can follow. (5) Sustainable Growth (ecological balance) - anyone can ship a demo; the real question is the year-two cost of running it, so Ejentic aims for automation that keeps paying for itself long after launch. (6) Digital Detox & Pruning (deliberate simplicity) - sometimes the best work is subtraction, so redundancy and noise are stripped until the remaining system is simple enough for the team to trust.",
+    "clearance": "public"
+  },
+  {
+    "text": "The Ejentic AI Transformation Journey is the company's five-stage client process: 01 Assessment & Strategy - determine what merits building and why before construction begins; if the numbers don't add up, Ejentic says it will tell you. 02 Pilot - a contained build that proves the concept, so clients see outcomes before large spend. 03 Full-Scale Deployment - the validated pilot goes into production, connected to the tools already in use. 04 Training & Change Management - staff are trained until the new workflow becomes routine. 05 Ongoing Optimization - post-launch monitoring and tuning as the business evolves.",
+    "clearance": "public"
+  },
+  {
+    "text": "Why teams choose Ejentic (the company's stated differentiators): Holistic Framework - the whole business is assessed, since an isolated fix seldom helps if everything else opposes it. ROI-Centric Approach - every project begins with a specific metric to move, checked honestly. Ethical, Human-Centric Design - bias and privacy are considered early, and a human stays in the loop where it matters. Agile Implementation - clients see working software every couple of weeks, which catches wrong turns cheaply. Ejentic works with both small businesses and large enterprises, and says engagements start with one honest conversation about where AI can genuinely help.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic's stated position on responsible AI: the company claims a clear-eyed view of AI's societal and human impact. It notes that automation reshapes jobs and says it plans for the required upskilling rather than glossing over it. Bias and data privacy are treated as serious design concerns, with the stated aim of a future where people and machines genuinely make each other better.",
+    "clearance": "public"
+  },
+  {
+    "text": "The technologies Ejentic builds with, as listed on its website: Robotic Process Automation (RPA), Machine Learning, NLP and NLG (natural language processing and generation), Computer Vision, cloud-based AI services, low-code platforms, and systems integration. Separately, Ejentic's own engineering stack relies heavily on Python, with Pinecone for vector storage in its RAG deployments.",
+    "clearance": "public"
+  },
+  {
+    "text": "How to contact Ejentic. Email: ejenticai@gmail.com. Phone: +234 811 411 3800. WhatsApp: https://wa.me/2348114113800. LinkedIn: https://www.linkedin.com/in/ejentic-ai-66a7a342a. X (Twitter): https://x.com/EjenticAI. The contact page is https://ejentic.xyz/contact. The +234 country code is Nigeria. Ejentic does not publish a physical office address or business hours on its website.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic's contact form is at https://ejentic.xyz/contact, headed \"Let's Build Together\", and is the route to get a quote, book a consultation, or enquire about custom AI integrations. It asks for: Name, Email, Company Name (optional), \"Where did you find us?\" (options: Google Search, Social Media, WhatsApp, Facebook Ads, Recommendation, Other), and \"How can we help you?\" as free text. The page says Ejentic's automated systems will reach out instantly. No specific response-time guarantee (SLA) and no calendar or third-party booking link are published; the form is the scheduling path.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic publishes a blog called the AI Insights Blog at https://ejentic.xyz/blog, headed \"Insights & Updates\" with the tagline \"Thoughts, news, and guides from the forefront of AI Agent technology.\" Yes, the blog exists and has published articles. Posts as of September 2026: \"A Functional Taxonomy of World Models\" (4 June 2026); \"The ROI of AI Integration: Why Businesses Can't Afford to Wait\" (22 May 2026); \"Understanding RAG: How AI Retrieves and Reasons Over Private Data\" (22 May 2026); \"The Evolution of Autonomous Agents: From Chatbots to Digital Workers\" (22 May 2026); \"The Bitter Lesson\" (22 May 2026); and \"Machines of Loving Grace\" (22 May 2026). Ejentic also runs a weekly email newsletter called the Enterprise AI Playbook, which visitors can subscribe to from the website.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic's demos page is https://ejentic.xyz/demos, headed \"Experience our Capabilities.\" It showcases three deployments: an Autonomous Customer Support Agent (a multilingual support agent resolving inquiries, refunds and escalations around the clock), the Lead Generation System (the agent chain that finds, qualifies, writes and books), and a Hybrid RAG Knowledge Vault (a secure agent querying large private databases). The Knowledge Vault is explicitly marked \"Live Demo Coming Soon\" and \"Currently in production\" - it is not yet available to try. The support and lead-generation entries are shown as recorded walkthroughs rather than interactive tools. The one hands-on self-serve tool on the page is the Market Analyzer (Ejentic Research): a visitor enters a market trend, business idea or societal problem, and it generates a feasibility and sentiment study.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic's Security & Compliance page is at https://ejentic.xyz/security. Its published commitments: data is encrypted in transit using TLS 1.3, and data at rest is encrypted using AES-256. For custom RAG agent deployments, client data is never used to train foundational models. Each tenant's embeddings and vector stores are logically isolated so one client's data is not retrievable by another. Access is governed by role-based access control (RBAC), and multi-factor authentication (MFA) is required for all internal engineering access to production environments. Ejentic does not currently publish any third-party security certification or audit - there is no SOC 2, ISO 27001, HIPAA or PCI DSS attestation listed, and no data residency region is named. Anyone who needs compliance documentation or a data processing agreement should contact Ejentic directly; the Privacy Policy is at /privacy and the Terms of Service at /terms.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic does not publish performance metrics or client results. The company's stated policy is that numbers are only published once a client has signed off on them, so figures such as hours saved, tickets resolved or meetings booked are not advertised. Anyone wanting evidence of results should request it directly through https://ejentic.xyz/contact.",
+    "clearance": "public"
+  },
+  {
+    "text": "Ejentic Academy is an announced Ejentic initiative with a page at https://ejentic.xyz/academy, positioned as \"Master Artificial Intelligence\" and \"Learn to build AI agents\", using a skill-tree metaphor: navigate the skill tree, unlock specialized branches, command autonomous systems. It is also listed among Ejentic's \"coming soon\" areas of expertise. As of September 2026 no curriculum, course list, cohort schedule, instructor, price or enrolment path has been published, and the Academy is not yet a purchasable offering. Anyone interested should watch /academy or ask via https://ejentic.xyz/contact.",
+    "clearance": "public"
+  }
 ]
-
