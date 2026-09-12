@@ -24,6 +24,7 @@ SUITES = [
     ("test_stream.py", "the duplicate-delta and prefix-leak stream bugs"),
     ("test_tenancy.py", "per-tenant data isolation (MULTITENANCY.md)"),
     ("test_audit_actor.py", "WHO asked — the audit trail's actor column"),
+    ("test_metrics_bridge.py", "what we report as billable usage and cost"),
 ]
 
 results = []

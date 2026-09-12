@@ -23,6 +23,14 @@ from sqlalchemy import Column, Integer, String, Text, DateTime, select, func
 
 import client_registry as registry
 
+# Optional business-metrics reporting (usage + AI cost -> the agency metrics hub).
+# Stays None unless METRICS_HUB is configured, so this import can never be the
+# reason a deployment fails to boot.
+try:
+    import metrics_bridge
+except Exception:  # noqa: BLE001 - optional instrumentation, never required
+    metrics_bridge = None
+
 # The tenant this process serves. Same resolution order as main.py/ingest so the
 # server, ingestion and the eval harness all write to one place.
 ACTIVE_CLIENT = os.environ.get("RAG_CLIENT", "").strip() or registry.active_client_id()
@@ -171,6 +179,21 @@ async def log_query(
             await session.commit()
     except Exception as exc:  # noqa: BLE001 - audit logging must never break a query
         print(f"[audit] WARNING: failed to persist audit log: {exc}")
+
+    # Business metrics: what this query cost us, and whether it served an answer.
+    # Every answer path funnels through log_query exactly once, so this reports
+    # once per query. Deliberately OUTSIDE the try above, so an audit-DB failure
+    # doesn't silently suppress cost reporting (or the reverse). emit() never
+    # raises and is a no-op unless METRICS_HUB is set.
+    if metrics_bridge is not None:
+        metrics_bridge.emit(
+            client or ACTIVE_CLIENT,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
+            total_tokens=total_tokens,
+            token_source=token_source,
+            gated=gated,
+        )
 
 
 async def get_token_metrics(limit: int = 20, client: str = None):
