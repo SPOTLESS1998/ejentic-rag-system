@@ -65,6 +65,24 @@ def _is_refusal(text: str, gated: bool) -> bool:
     return bool(gated) or (main.ESCALATION_LINE.split(".")[0].strip() in text)
 
 
+# WHICH model graded this run. Defaults to the system LLM so behaviour is unchanged,
+# but can be pinned independently: `JUDGE_MODEL=models/gemini-flash-lite-002 python
+# eval_rag.py`.
+#
+# Worth pinning before you show a report to a client. The configured default
+# (`models/gemini-flash-lite-latest`) is a FLOATING ALIAS — the provider can move it
+# to a different model with no commit on our side, so two runs of the same code over
+# the same corpus can be graded by two different judges and nothing in the repo would
+# say so. The resolved value is written into the report for exactly that reason: a
+# grade whose grader is unrecorded is not evidence.
+#
+# NOT hardcoded to a dated version here, because the set of servable dated versions is
+# a live fact about the provider (a listed model can still 404 on chat — see the
+# eval history), and guessing one would swap a known-floating judge for a possibly
+# dead one.
+JUDGE_MODEL = os.environ.get("JUDGE_MODEL") or main.LLM_MODEL
+
+
 # The pipeline turns ANY upstream exception (rate-limit 429, 5xx, network) into a
 # sentinel string with gated=False (main.answer_once's except-clause). To the
 # scorer that looks like "the system chose to answer", but it isn't a behavioural
@@ -87,7 +105,25 @@ def _leaks(text: str, forbidden) -> list:
 
 def _parse_verdict(content: str) -> tuple:
     """Pull {"verdict","reason"} out of the judge's reply, tolerating stray prose
-    or markdown fences. Falls back to a keyword salvage, then to FAIL."""
+    or markdown fences.
+
+    FAILS CLOSED: a reply this cannot read returns ERROR — an UNVERIFIED case —
+    never a pass.
+
+    It used to salvage a PASS from any reply containing "PASS" and not "FAIL",
+    which read a refusal like "the answer conveys none of the required facts and
+    must not PASS" as a PASS. That was a fail-OPEN parser sitting underneath the
+    only automated grade this system produces, and it mattered more than it looks:
+    the judge runs on a FLOATING model alias, so the reply FORMAT can change with
+    no commit on our side — and a parser that guesses in the permissive direction
+    turns a provider-side change into a silently greener report.
+
+    The FAIL salvage is kept: it only ever errs toward failing, so prose that says
+    FAIL and nothing else is honoured rather than thrown away. Everything
+    else — a bare PASS in prose, both words, neither word — is ERROR, because
+    "I could not read the grade" and "the answer was good" are different facts and
+    only one of them is safe to assume.
+    """
     snippet = content.strip()
     match = re.search(r"\{.*\}", snippet, re.DOTALL)
     if match:
@@ -100,11 +136,9 @@ def _parse_verdict(content: str) -> tuple:
         except (ValueError, TypeError):
             pass
     up = snippet.upper()
-    if "PASS" in up and "FAIL" not in up:
-        return "PASS", "(salvaged from non-JSON judge reply)"
     if "FAIL" in up and "PASS" not in up:
         return "FAIL", "(salvaged from non-JSON judge reply)"
-    return "FAIL", f"unparseable judge output: {snippet[:120]!r}"
+    return "ERROR", f"unreadable judge output: {snippet[:120]!r}"
 
 
 def _build_judge_llm():
@@ -116,7 +150,7 @@ def _build_judge_llm():
     a real grade. Falls back to the system LLM if a temp-0 instance can't be built."""
     try:
         return main.NVIDIA(
-            model=main.LLM_MODEL,
+            model=JUDGE_MODEL,
             api_key=os.environ.get("LLM_API_KEY") or main.NVIDIA_API_KEY,
             base_url=os.environ.get("LLM_BASE_URL") or None,
             temperature=0.0,
@@ -211,6 +245,18 @@ async def _judge_with_retry(judge_llm, judge_meter, case: dict, text: str,
                              case["must_include"], text),
                 timeout=call_timeout,
             )
+            if verdict not in ("PASS", "FAIL"):
+                # The call COMPLETED; we just could not read a grade out of it.
+                # This must be surfaced as unverified, and that is not optional
+                # book-keeping: run()'s final ladder tests `correctness == "FAIL"`
+                # and treats everything else as a pass, so an unreadable verdict
+                # returned as a plain verdict becomes a SILENT PASS. Routing it
+                # through judge_infra puts it on the errored branch instead.
+                #
+                # Deliberately NOT retried: an unreadable reply is not a transport
+                # glitch, and the judge runs at temperature 0, so asking the same
+                # question again buys tokens and the same answer.
+                return "ERROR", reason, f"judge reply unreadable — {reason}"
             return verdict, reason, None
         except Exception as exc:  # noqa: BLE001 - timeout or provider error = infra, retry
             last_exc = exc
@@ -333,7 +379,7 @@ def report(results, judge_meter, out_path, min_pass, use_judge,
     print("\n" + "=" * 74)
     print("  EJENTIC RAG — EVALUATION REPORT")
     print("=" * 74)
-    print(f"  judge model: {main.LLM_MODEL}   confidence gate: {main.CONFIDENCE_THRESHOLD}"
+    print(f"  judge model: {JUDGE_MODEL}   confidence gate: {main.CONFIDENCE_THRESHOLD}"
           f"   judge: {'on' if use_judge else 'OFF'}")
 
     for dim in DIMENSIONS:
@@ -376,6 +422,15 @@ def report(results, judge_meter, out_path, min_pass, use_judge,
     # untested leak-probe never reads as secure; else clean.
     if any_leak:
         exit_code, result_word = 2, "FAIL — CLEARANCE LEAK"
+    elif not n_scored:
+        # Nothing could be graded AT ALL (every case errored, or the set was
+        # empty). That is "we could not test this", which is a different claim
+        # from "the answers were wrong" — and it has to be caught before the
+        # min-pass check, because pass_rate is 0/0 -> 0.0 here by definition, so
+        # min-pass would otherwise report a 0% SCORE for a run that never scored
+        # anything. Both paths exit non-zero, so this only ever corrects which
+        # failure is reported; it cannot turn a failing run into a passing one.
+        exit_code, result_word = 4, "INCOMPLETE — nothing could be verified"
     elif pass_rate < min_pass:
         exit_code, result_word = 1, "FAIL — below min-pass"
     elif errored:
@@ -391,6 +446,14 @@ def report(results, judge_meter, out_path, min_pass, use_judge,
             "total": total, "scored": n_scored, "passed": passed,
             "errored": len(errored), "pass_rate": round(pass_rate, 4),
             "min_pass": min_pass, "any_leak": any_leak, "judge_enabled": use_judge,
+            # Recorded so a stored report says WHAT graded it. `judge_model` is
+            # whatever JUDGE_MODEL resolved to; `judge_model_is_alias` flags the
+            # floating-alias case, where the name does not identify a fixed model
+            # and the run is therefore not reproducible from this file alone.
+            "judge_model": JUDGE_MODEL,
+            "judge_model_is_alias": JUDGE_MODEL.endswith("-latest"),
+            "system_llm_model": main.LLM_MODEL,
+            "confidence_threshold": main.CONFIDENCE_THRESHOLD,
             "by_dimension": by_dim,
             "tokens": {
                 "system_prompt": sys_prompt, "system_completion": sys_completion,
