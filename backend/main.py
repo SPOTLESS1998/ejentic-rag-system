@@ -81,6 +81,7 @@ from database import init_db, log_query, get_token_metrics, DB_PATH
 from token_meter import TokenMeter, estimate_tokens
 import client_registry as registry
 import auth as authmod
+import ratelimit
 
 # ---------------------------------------------------------------------------
 # PATCH: llama-index's NVIDIA client validates the model against a LIVE
@@ -707,6 +708,29 @@ def _clearance_for(role: str, requested: str) -> str:
         return authmod.effective_clearance(role, requested, CFG)
     except authmod.AuthError as e:
         raise authmod.as_http(e)
+
+
+# One limiter for the process. Buckets are keyed by the AUTHENTICATED role, so a
+# compromised guest key cannot spend the executive tier's allowance.
+LIMITER = ratelimit.limits_from_config(CFG)
+
+
+def _rate_limit(role: str) -> None:
+    """Charge one request against this credential's ceilings, or 429.
+
+    ⚠️ ORDER MATTERS, and it is the opposite of the query-length check. The
+    length cap is declared on the pydantic model so it runs BEFORE auth — it
+    costs nothing to decide, so deciding it early is free. This runs AFTER auth,
+    deliberately: the limiter's budget is itself a resource worth protecting, and
+    keying it on anything an unauthenticated caller controls would let a keyless
+    attacker burn the legitimate users' allowance — a denial of service delivered
+    THROUGH the rate limiter. Rejecting a bad key first costs no tokens anyway.
+    """
+    try:
+        LIMITER.admit(role)
+    except ratelimit.RateLimitError as e:
+        raise HTTPException(status_code=e.status, detail=e.detail,
+                            headers={"Retry-After": str(e.retry_after)})
 
 
 # ---------------------------------------------------------------------------
@@ -1343,6 +1367,7 @@ async def chat(request: QueryRequest,
     if global_index is None:
         raise HTTPException(status_code=500, detail="Agent not initialized.")
     role = _authed_role(x_api_key, authorization)
+    _rate_limit(role)
     clearance = _clearance_for(role, request.clearance_level)
     # WHO, for the audit trail only. Resolved AFTER the key decided the clearance
     # above, so it cannot influence it.
@@ -1386,6 +1411,7 @@ async def n8n_rag_endpoint(request: QueryRequest,
     if global_index is None:
         raise HTTPException(status_code=500, detail="Agent not initialized.")
     role = _authed_role(x_api_key, authorization)
+    _rate_limit(role)
     clearance = _clearance_for(role, request.clearance_level)
     # WHO, for the audit trail only — resolved after the key decided clearance.
     actor = authmod.clean_actor(x_actor)
@@ -1456,6 +1482,7 @@ async def trigger_ingestion(
     import subprocess
 
     role = _authed_role(x_api_key, authorization)
+    _rate_limit(role)
     try:
         authmod.require_admin(role, CFG)
     except authmod.AuthError as e:
@@ -1608,7 +1635,7 @@ async def upload_pdf(file: UploadFile = File(...),
     is precisely why it is token-scoped rather than global: the old code kept ONE
     process-wide index and mixed it into every caller's queries.
     """
-    _authed_role(x_api_key, authorization)
+    _rate_limit(_authed_role(x_api_key, authorization))
 
     upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "uploads")
     os.makedirs(upload_dir, exist_ok=True)

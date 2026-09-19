@@ -89,6 +89,20 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # thinking and returns an empty string, which reads as a dead provider.
     "max_output_tokens": 2048,
     "max_query_chars": 2000,       # a real question is never near this
+    # Request ceilings — the OTHER half. Bounding the SIZE of one request does
+    # not bound the COUNT of them, and a valid key pointed at a loop is
+    # unbounded spend made of individually-reasonable requests. The two compose:
+    # max_requests_per_day x max_output_tokens is the worst-case daily
+    # completion spend, PER ROLE. Rolling windows, not calendar ones. `null`
+    # disables a window; 0 closes it. See ratelimit.py.
+    #
+    # These defaults are provider-agnostic on purpose. A deployment on a metered
+    # or free-tier provider should set its own numbers BELOW that provider's
+    # quota in its own clients/<id>.json, so we refuse gracefully with a
+    # Retry-After rather than the provider returning a raw 429 mid-demo — that
+    # number is a fact about one deployment and does not belong in the defaults.
+    "max_requests_per_minute": 30,
+    "max_requests_per_day": 500,
     # --- Ingestion ---
     "chunk_size": 500,
     "chunk_overlap": 50,

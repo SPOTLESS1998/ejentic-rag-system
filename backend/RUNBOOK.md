@@ -314,6 +314,67 @@ venv/bin/uvicorn main:app --host 0.0.0.0 --port 8002
 Health check: `GET http://localhost:8002/` should report
 `"token_metering": true` and `"metrics_endpoint": "/metrics"`.
 
+> ⚠️ **Serve with ONE worker.** The rate limiter (§5a) counts in this process's
+> memory, so `--workers N` silently multiplies every limit by N. Nothing can
+> detect this at runtime. If you ever need more than one worker, the limits have
+> to move to shared storage first.
+
+---
+
+## 5a. Cost ceilings — what bounds the bill
+
+Three limits compose into a spend ceiling. Each is useless without the others,
+so change them as a set and redo the arithmetic when you do.
+
+| Setting | Default | What it bounds |
+|---|---|---|
+| `max_query_chars` | 2000 | How big one question can be |
+| `max_output_tokens` | 2048 | How long one answer can run |
+| `max_requests_per_minute` | 30 | Burst, per role |
+| `max_requests_per_day` | 500 | Sustained use, per role (rolling 24h) |
+
+**The arithmetic that matters**, with the shipped defaults:
+
+```
+500 requests/day  x  2048 tokens  =  1,024,000 completion tokens/day  PER ROLE
+```
+
+Multiply by the number of roles that actually hold a key for the instance-wide
+worst case. That number is worst case, not expected: real answers run ~300
+tokens, so normal use is well under a tenth of it.
+
+Bounding the *count* of requests is only a cost control because each request is
+already bounded. Raise `max_output_tokens` and you raise the daily ceiling by
+the same factor without touching the request limits at all.
+
+**Tune these per deployment, in `clients/<id>.json` — not in the defaults.**
+The shipped numbers are provider-agnostic. If you serve from a metered or
+free-tier provider, set the daily limit BELOW that provider's own quota so we
+refuse gracefully with a `Retry-After` instead of the provider returning a raw
+`429` in the middle of a client demo:
+
+```json
+{ "max_requests_per_minute": 20, "max_requests_per_day": 200 }
+```
+
+`null` disables a window. `0` CLOSES it — a typo must not read as "unlimited".
+
+**What a caller sees** when it goes over: HTTP `429` with a `Retry-After` header
+in whole seconds. Limits are per authenticated ROLE, so a compromised guest key
+cannot spend the executive tier's allowance. An unauthenticated request is
+rejected `401` and charged to nobody — verify that with:
+
+```bash
+for i in $(seq 1 40); do curl -s -o /dev/null -w "%{http_code} " \
+  -X POST localhost:8002/api/rag -H 'Content-Type: application/json' \
+  -d '{"query":"hi"}'; done; echo        # expect 40x 401, never a 429
+```
+
+**Known limitation:** the windows live in memory, so a restart clears them. This
+bounds spend per uptime period, not per calendar day. Accepted deliberately — a
+limiter that reads a database can fail, and then you must choose between
+unbounded spend and an outage. Nobody but us can restart the process.
+
 ---
 
 ## Quick reference — full rebuild from scratch
