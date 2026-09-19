@@ -72,6 +72,23 @@ DEFAULT_CONFIG: dict[str, Any] = {
     "hybrid_alpha": 0.5,           # 1.0 = pure dense, 0.0 = pure sparse
     "rerank_alpha": 0.5,           # lexical rerank blend: 1.0 dense, 0.0 BM25
     "query_rewrite_enabled": True,
+    # --- Resource bounds (per-request ceilings, not tuning) -------------------
+    # These exist because nothing else bounded a single request. The LLM was
+    # constructed with no max_tokens at all and LLM_TIMEOUT defaults to 300s, so
+    # one caller could hold a five-minute unbounded generation open; and `query`
+    # was an unbounded str, so the prompt that generation worked from had no
+    # ceiling either. Neither is a tuning knob — they are the difference between
+    # "expensive" and "unbounded", and an unbounded cost on a public endpoint is
+    # the one failure mode that cannot be recovered after the fact.
+    #
+    # Sized to be invisible in normal use: observed real answers run ~1,100
+    # characters (~300 tokens), so 2048 output tokens is ~7x the longest answer
+    # this system has actually produced. Deliberately NOT tight — a cap small
+    # enough to truncate a legitimate answer would trade a cost problem for a
+    # correctness problem, and on a reasoning model a small budget is spent
+    # thinking and returns an empty string, which reads as a dead provider.
+    "max_output_tokens": 2048,
+    "max_query_chars": 2000,       # a real question is never near this
     # --- Ingestion ---
     "chunk_size": 500,
     "chunk_overlap": 50,

@@ -49,7 +49,7 @@ material with no credential at all.
 from fastapi import FastAPI, HTTPException, UploadFile, File, Header
 from fastapi.responses import StreamingResponse, JSONResponse
 from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 import asyncio
 import json
 import math
@@ -234,6 +234,10 @@ RETRIEVE_TOP_K = int(os.environ.get("RETRIEVE_TOP_K") or CFG["retrieve_top_k"])
 RERANK_TOP_N = int(os.environ.get("RERANK_TOP_N") or CFG["rerank_top_n"])
 CONFIDENCE_THRESHOLD = float(os.environ.get("CONFIDENCE_THRESHOLD") or CFG["confidence_threshold"])
 MAX_CONTEXT_CHARS = int(os.environ.get("MAX_CONTEXT_CHARS") or CFG["max_context_chars"])
+# Per-request ceilings. See client_registry.DEFAULT_CONFIG for why these exist and
+# why they are generous rather than tight.
+MAX_OUTPUT_TOKENS = int(os.environ.get("MAX_OUTPUT_TOKENS") or CFG["max_output_tokens"])
+MAX_QUERY_CHARS = int(os.environ.get("MAX_QUERY_CHARS") or CFG["max_query_chars"])
 HYBRID_ALPHA = float(os.environ.get("HYBRID_ALPHA") or CFG["hybrid_alpha"])
 RERANK_ALPHA = float(os.environ.get("RERANK_ALPHA") or CFG["rerank_alpha"])
 # NVIDIA's PUBLIC hosted reranking API reached end-of-life on 2026-05-18 (HTTP 410
@@ -567,6 +571,12 @@ else:
                 model=LLM_MODEL,
                 api_key=os.environ.get("LLM_API_KEY") or NVIDIA_API_KEY,
                 timeout=LLM_TIMEOUT,
+                # Without this the model decides how long to talk for, and
+                # LLM_TIMEOUT (300s default) becomes the only ceiling on a single
+                # request — so one caller could hold a five-minute unbounded
+                # generation open and bill it to us. Generous on purpose: see
+                # client_registry.DEFAULT_CONFIG.
+                max_tokens=MAX_OUTPUT_TOKENS,
                 base_url=os.environ.get("LLM_BASE_URL") or None,
                 **LLM_SWAP_KWARGS,
             )
@@ -654,7 +664,15 @@ app.add_middleware(
 
 
 class QueryRequest(BaseModel):
-    query: str
+    # BOUNDED, not merely typed. This was a bare `str`, so a caller could post a
+    # megabyte and have us embed it, rewrite it through one LLM hop, and feed it
+    # to a metered model — per request, with nothing about it looking like abuse.
+    #
+    # The cap lives on the model on purpose: FastAPI validates the body BEFORE the
+    # handler runs, so an over-long query is refused (422) with no embedding call,
+    # no retrieval and no LLM call behind it. A length check inside the handler
+    # would run after the spend it exists to prevent.
+    query: str = Field(..., max_length=MAX_QUERY_CHARS)
     # The clearance a caller ASKS for. It is no longer trusted on its own: the
     # role comes from the API key, and this may only NARROW it (see auth.py).
     clearance_level: str = ""

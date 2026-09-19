@@ -26,6 +26,7 @@ SUITES = [
     ("test_audit_actor.py", "WHO asked — the audit trail's actor column"),
     ("test_metrics_bridge.py", "what we report as billable usage and cost"),
     ("test_eval_harness.py", "the grader itself — it used to salvage a PASS it could not read"),
+    ("test_resource_bounds.py", "per-request ceilings — the unbounded query + unbounded generation"),
 ]
 
 results = []
