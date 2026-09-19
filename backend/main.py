@@ -737,6 +737,29 @@ def build_clearance_filter(clearance_level: str, cfg: dict | None = None):
     )
 
 
+def allowed_clearance_tags(clearance_level: str, cfg: dict | None = None) -> set:
+    """The `clearance` tags a role may see — DERIVED FROM the filter that enforces
+    it, never reimplemented alongside it.
+
+    Writing the rules out a second time is the obvious way to do this and the
+    wrong one. Two copies drift, and the copy that drifts is the one doing the
+    CHECKING — so the check quietly starts approving what the filter would have
+    refused, which is the exact failure a check exists to prevent. Reading the
+    answer back out of build_clearance_filter keeps one source of truth, and means
+    a future change to the access rules cannot leave this behind.
+
+    Mirrors that function's three outcomes:
+      * None (wildcard "*") -> the tenant's whole tag vocabulary
+      * MetadataFilters     -> the tags it will match on
+      * unknown role        -> whatever it failed closed to, unchanged
+    """
+    cfg = cfg or CFG
+    filt = build_clearance_filter(clearance_level, cfg)
+    if filt is None:
+        return set(registry.tenant_clearance_tags(cfg))
+    return {f.value for f in filt.filters}
+
+
 def resolve_request_client(request_client: str) -> dict:
     """Validate the optional `client` field on a request.
 
@@ -803,6 +826,46 @@ async def rewrite_query(query: str, meter=None) -> str:
 # ---------------------------------------------------------------------------
 # Step 2b/2c — Retrieve (hybrid or dense) then rerank
 # ---------------------------------------------------------------------------
+def _enforce_clearance(nodes, clearance_level: str):
+    """Defence in depth: drop retrieved nodes carrying a `clearance` tag this role
+    may not see, and say so loudly.
+
+    On the happy path this removes NOTHING — build_clearance_filter already
+    constrained the query — and that is the point. It only ever acts once the
+    primary control has already failed: a filter regression, a vector-store
+    change, a mis-tagged chunk. Today the boundary is enforced in exactly one
+    place, so a single fault there is a silent leak with nothing behind it.
+
+    UNTAGGED nodes are KEPT, deliberately. An untagged vector matches no EQ
+    filter, so a restricted role cannot retrieve one in the first place; only the
+    wildcard role reaches them, and the wildcard role is allowed everything. An
+    untagged chunk is therefore a data-integrity problem (ingestion is supposed to
+    reject it) and never a cross-tier leak — so dropping it here would trade real
+    availability for no security at all. Warned about separately instead.
+    """
+    allowed = allowed_clearance_tags(clearance_level)
+    kept, breached, untagged = [], [], 0
+    for n in nodes:
+        tag = (getattr(n.node, "metadata", {}) or {}).get("clearance")
+        if tag is None:
+            untagged += 1
+            kept.append(n)
+        elif tag in allowed:
+            kept.append(n)
+        else:
+            breached.append(tag)
+    if breached:
+        print(f"[SECURITY] clearance guard DROPPED {len(breached)} retrieved node(s) "
+              f"tagged {sorted(set(breached))} for role {clearance_level!r} — the "
+              f"metadata filter did NOT hold. This is a leak that did not happen; "
+              f"investigate the filter, not this guard.", file=sys.stderr, flush=True)
+    if untagged:
+        print(f"[integrity] {untagged} retrieved node(s) carry no clearance tag; "
+              f"ingestion should have rejected those. Kept — only the wildcard role "
+              f"can reach an untagged vector.", file=sys.stderr, flush=True)
+    return kept
+
+
 async def retrieve_and_rerank(query: str, clearance_level: str, meter=None,
                               upload_token: str = ""):
     """Returns (nodes, max_raw_score, rewritten_query). `nodes` is the reranked,
@@ -824,6 +887,12 @@ async def retrieve_and_rerank(query: str, clearance_level: str, meter=None,
     )
 
     raw_nodes = await retriever.aretrieve(search_query)
+
+    # Second check on what the store actually returned. Runs BEFORE the uploaded
+    # PDF is folded in, and that ordering IS the carve-out: upload nodes carry no
+    # `clearance` tag because they are the caller's own document, so guarding them
+    # here would be meaningless work on data that never came from the index.
+    raw_nodes = _enforce_clearance(raw_nodes, clearance_level)
 
     # Fold in THIS CALLER'S uploaded PDF (only if they presented its token) so it
     # competes in the same rerank. It isn't clearance-filtered because it is the

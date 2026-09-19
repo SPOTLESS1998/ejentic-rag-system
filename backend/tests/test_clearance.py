@@ -324,4 +324,126 @@ for _canary in ("2.4M", "OmniScrape", "Project Delta", "12M"):
     check(f"the greeting reply leaks no canary ({_canary})",
           _canary.lower() not in m.GREETING_REPLY.lower())
 
+
+# ---------------------------------------------------------------------------
+section("allowed_clearance_tags is DERIVED from the filter, not a second copy")
+# ---------------------------------------------------------------------------
+# The whole risk this addresses: writing the access rules out twice. If the
+# checker drifts from the enforcer, the checker starts approving what the filter
+# would refuse — the exact failure a checker exists to prevent. So the property
+# under test is not "these values are right", it is "these two agree, always".
+_ALL_TAGS = set(registry.tenant_clearance_tags(CFG))
+
+for _role in list(CFG["clearance_levels"]) + ["admin", "root", "", "guest;--", "GUEST"]:
+    _filter_tags = tags_of(_role)
+    _expected = _ALL_TAGS if _filter_tags == "*" else set(_filter_tags)
+    check(f"allowed tags agree with the filter for role {_role!r}",
+          m.allowed_clearance_tags(_role, CFG) == _expected,
+          f"filter={_filter_tags} allowed={sorted(m.allowed_clearance_tags(_role, CFG))}")
+
+check("a wildcard role resolves to the whole vocabulary, not to an empty set",
+      m.allowed_clearance_tags("executive", CFG) == _ALL_TAGS and bool(_ALL_TAGS))
+check("a wildcard role's tag set includes the restricted tiers it outranks",
+      m.allowed_clearance_tags("guest", CFG) <= m.allowed_clearance_tags("executive", CFG))
+check("an unknown role gets a NON-EMPTY least-privileged set (never 'no filter')",
+      0 < len(m.allowed_clearance_tags("admin", CFG)) < len(_ALL_TAGS))
+
+
+# ---------------------------------------------------------------------------
+section("_enforce_clearance — the guard behind the filter")
+# ---------------------------------------------------------------------------
+# Defence in depth. On the happy path it must remove NOTHING; it only acts once
+# the metadata filter has already failed. Both halves are asserted, because a
+# guard that quietly drops legitimate content is its own outage.
+def _n(tag, text="x"):
+    md = {} if tag is None else {"clearance": tag}
+    return NodeWithScore(node=TextNode(text=text, metadata=md), score=0.5)
+
+
+_public, _internal, _exec = _n("public"), _n("internal"), _n("executive")
+
+check("happy path: a guest's public nodes are untouched",
+      m._enforce_clearance([_public, _public], "guest") == [_public, _public])
+check("happy path: the executive role keeps every tier",
+      len(m._enforce_clearance([_public, _internal, _exec], "executive")) == 3)
+check("happy path: an employee keeps public + internal",
+      len(m._enforce_clearance([_public, _internal], "employee")) == 2)
+
+check("BREACH: an executive-tagged node is DROPPED for a guest",
+      m._enforce_clearance([_public, _exec], "guest") == [_public])
+check("BREACH: an internal-tagged node is DROPPED for a guest",
+      m._enforce_clearance([_internal], "guest") == [])
+check("BREACH: an executive-tagged node is DROPPED for an employee",
+      m._enforce_clearance([_public, _internal, _exec], "employee") == [_public, _internal])
+check("BREACH: an unknown role keeps only the least-privileged tier",
+      m._enforce_clearance([_public, _internal, _exec], "admin") == [_public])
+check("BREACH: every restricted node dropped leaves an empty list, not the input",
+      m._enforce_clearance([_exec, _internal], "guest") == [])
+
+# Untagged nodes: kept ON PURPOSE. An untagged vector matches no EQ filter, so a
+# restricted role cannot retrieve one; only the wildcard role reaches them, and it
+# is allowed everything. Dropping them would cost availability for no security.
+check("an untagged node is KEPT for a guest (data integrity, not a leak)",
+      m._enforce_clearance([_n(None)], "guest") == [_n(None)] or
+      len(m._enforce_clearance([_n(None)], "guest")) == 1)
+check("an untagged node is KEPT for the executive role",
+      len(m._enforce_clearance([_n(None)], "executive")) == 1)
+check("untagged nodes survive alongside a dropped breach node",
+      len(m._enforce_clearance([_n(None), _exec], "guest")) == 1)
+
+check("empty input returns empty output", m._enforce_clearance([], "guest") == [])
+check("relevance order is preserved among kept nodes",
+      [nd.node.text for nd in
+       m._enforce_clearance([_n("public", "a"), _n("executive", "b"),
+                             _n("public", "c")], "guest")] == ["a", "c"])
+check("a node with metadata=None does not crash the guard",
+      len(m._enforce_clearance(
+          [NodeWithScore(node=TextNode(text="x"), score=0.5)], "guest")) == 1)
+check("the guard never INVENTS a node",
+      len(m._enforce_clearance([_public], "guest")) <= 1)
+
+
+# ---------------------------------------------------------------------------
+section("the guard is WIRED INTO retrieval, not merely defined")
+# ---------------------------------------------------------------------------
+# Everything above tests the guard in isolation, so all of it would still pass if
+# someone deleted the single line that CALLS it. That is precisely how the audit
+# trail's `actor` shipped broken: the proxy sent it, the docs described it, and
+# the middle was missing. So drive the real retrieve_and_rerank with a store that
+# hands back a node the role may not see, and prove it cannot reach synthesis.
+import asyncio  # noqa: E402
+
+_BREACH = [_n("public", "legitimate"), _n("executive", "SECRET-BOARD-MATERIAL")]
+
+
+def _fake_retriever_cls(**kwargs):
+    class _R:
+        async def aretrieve(self, _q):
+            return list(_BREACH)          # the filter "failed": a breach node came back
+    return _R()
+
+
+async def _no_rewrite(q, meter=None):
+    return q                               # no LLM hop in an offline test
+
+
+_saved = (m.VectorIndexRetriever, m.rewrite_query, m.reranker, m.global_index)
+m.VectorIndexRetriever = _fake_retriever_cls
+m.rewrite_query = _no_rewrite
+m.reranker = None
+m.global_index = object()
+try:
+    _nodes, _max, _q = asyncio.run(m.retrieve_and_rerank("anything", "guest"))
+    _texts = [nd.node.text for nd in _nodes]
+    check("WIRING: a breach node from the store never reaches synthesis",
+          "SECRET-BOARD-MATERIAL" not in _texts, f"got {_texts}")
+    check("WIRING: the legitimate node still does (guard is not a blanket drop)",
+          "legitimate" in _texts, f"got {_texts}")
+
+    _nodes_x, _, _ = asyncio.run(m.retrieve_and_rerank("anything", "executive"))
+    check("WIRING: the executive role still receives the executive node",
+          "SECRET-BOARD-MATERIAL" in [nd.node.text for nd in _nodes_x])
+finally:
+    (m.VectorIndexRetriever, m.rewrite_query, m.reranker, m.global_index) = _saved
+
 finish("test_clearance")
