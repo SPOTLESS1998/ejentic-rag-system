@@ -56,6 +56,7 @@ TWO RULES THAT ARE EASY TO GET WRONG
 """
 from __future__ import annotations
 
+import os
 import time
 from collections import deque
 from typing import Optional
@@ -217,14 +218,38 @@ class RateLimiter:
                 for w in self.windows}
 
 
-def _window_limit(value, key: str) -> Optional[int]:
-    """A window is ON only when its config value is a positive int.
+def _window_limit(value, key: str, env_name: str) -> Optional[int]:
+    """Resolve one window's limit from the environment, else the tenant config.
 
-    `null` (or a missing key) means the window is DISABLED — the explicit way to
-    say "no limit". A 0 or negative value is NOT read as unlimited: that reading
-    turns a typo into an open door, and the whole module exists to close one.
-    Zero is honoured literally by _Window as a closed door.
+    WHY ENV OVERRIDES EXIST HERE and not only in the JSON: these are the numbers
+    most likely to need changing in a hurry — a limit set too tight is
+    indistinguishable from an outage to the people hitting it. Every other
+    tunable in main.py is `env or config`, and the knob you reach for during an
+    incident must live in the deployment's env file, not inside a file copy that
+    needs a rebuild.
+
+    FAIL-CLOSED ON ABSENCE. An unset variable means "use the configured limit",
+    never "no limit". Turning the limiter off takes an EXPLICIT `off`, because
+    "absent = disabled" is how a cost control quietly stops existing — the same
+    shape as the RAG_STAFF off-switch that failed open (see the audit notes).
+
+    `null`/missing in config disables a window; 0 CLOSES it. A typo must not read
+    as unlimited, so a non-integer is an error at load rather than a default.
     """
+    raw = (os.environ.get(env_name) or "").strip()
+    if raw:
+        if raw.lower() in ("off", "none", "null", "disabled"):
+            print(f"[ratelimit] WARNING: {env_name}={raw!r} — the {key} ceiling is "
+                  f"DISABLED for this process. Spend on this window is unbounded.")
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            raise ValueError(
+                f"{env_name}={raw!r} must be an integer, or 'off' to disable "
+                f"the window. Refusing to guess."
+            )
+
     if value is None:
         return None
     if not isinstance(value, int) or isinstance(value, bool):
@@ -249,14 +274,25 @@ def limits_from_config(cfg: dict) -> RateLimiter:
     of questions a minute, so 30 is roughly 10x normal use — while stopping a
     runaway loop within seconds. They are NOT sized against any particular
     provider's quota: a deployment on a metered or free-tier provider should set
-    its own numbers BELOW that provider's limit, in its own `clients/<id>.json`,
-    so we refuse gracefully with a Retry-After instead of the provider returning
-    a raw 429 in the middle of a demo. That number is a fact about a specific
-    deployment, so it belongs in that tenant's config and never here.
+    its own numbers BELOW that provider's limit, in its own `clients/<id>.json`
+    or via the env overrides below, so we refuse gracefully with a Retry-After
+    instead of the provider returning a raw 429 in the middle of a demo. That
+    number is a fact about a specific deployment, so it belongs in that tenant's
+    config and never here.
+
+    ⚠️ ONE BUCKET PER ROLE, NOT PER PERSON. A deployment whose public UI holds a
+    single shared key puts every visitor in the same bucket, so the daily limit
+    is the whole site's budget rather than one visitor's. Size it against
+    expected total traffic, not per-user behaviour.
+
+    Env overrides (for the deployment's env file, changeable without a rebuild):
+    MAX_REQUESTS_PER_MINUTE, MAX_REQUESTS_PER_DAY. Unset = use config.
     """
     return RateLimiter(
         per_minute=_window_limit(cfg.get("max_requests_per_minute"),
-                                 "max_requests_per_minute"),
+                                 "max_requests_per_minute",
+                                 "MAX_REQUESTS_PER_MINUTE"),
         per_day=_window_limit(cfg.get("max_requests_per_day"),
-                              "max_requests_per_day"),
+                              "max_requests_per_day",
+                              "MAX_REQUESTS_PER_DAY"),
     )

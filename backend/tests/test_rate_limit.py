@@ -201,6 +201,49 @@ for bad in ("30", 3.5, True, []):
     except ValueError:
         check(f"a non-integer limit ({bad!r}) is rejected at load", True)
 
+# --- env overrides -------------------------------------------------------
+# These are the numbers most likely to need changing in a hurry: a limit set too
+# tight is indistinguishable from an outage to the people hitting it. They must
+# be changeable from the deployment's env file, not only from a JSON file inside
+# a deployed copy that would need a rebuild.
+_cfgd = {"max_requests_per_minute": 30, "max_requests_per_day": 500}
+with env(MAX_REQUESTS_PER_MINUTE="7"):
+    check("MAX_REQUESTS_PER_MINUTE overrides the config value",
+          ratelimit.limits_from_config(_cfgd).windows[0].limit == 7)
+with env(MAX_REQUESTS_PER_DAY="4000"):
+    _l = ratelimit.limits_from_config(_cfgd)
+    check("MAX_REQUESTS_PER_DAY overrides the config value",
+          _l.windows[1].limit == 4000, f"={_l.windows[1].limit}")
+    check("overriding one window leaves the other on its configured value",
+          _l.windows[0].limit == 30, f"={_l.windows[0].limit}")
+
+# FAIL-CLOSED ON ABSENCE. An unset or blank variable must mean "use the config",
+# never "no limit" — "absent = disabled" is how a cost control quietly stops
+# existing. Turning it off takes an explicit word.
+with env(MAX_REQUESTS_PER_MINUTE=None, MAX_REQUESTS_PER_DAY=None):
+    check("an UNSET override falls back to config, it does not disable",
+          ratelimit.limits_from_config(_cfgd).windows[0].limit == 30)
+with env(MAX_REQUESTS_PER_MINUTE="   "):
+    check("a BLANK override falls back to config, it does not disable",
+          ratelimit.limits_from_config(_cfgd).windows[0].limit == 30)
+with env(MAX_REQUESTS_PER_MINUTE="off"):
+    _l = ratelimit.limits_from_config(_cfgd)
+    check("disabling a window takes the explicit word 'off'",
+          [w.label for w in _l.windows] == ["per-day"],
+          f"windows={[w.label for w in _l.windows]}")
+with env(MAX_REQUESTS_PER_MINUTE="lots"):
+    try:
+        ratelimit.limits_from_config(_cfgd)
+        check("an unreadable override is an error, not a silent default", False,
+              "accepted")
+    except ValueError as e:
+        check("an unreadable override is an error, not a silent default", True)
+        check("...and the error says what to write instead",
+              "off" in str(e) and "integer" in str(e), f"{e}")
+with env(MAX_REQUESTS_PER_MINUTE="0"):
+    check("0 via env still means CLOSED, not unlimited",
+          not _admit(ratelimit.limits_from_config(_cfgd), "g", now=0.0))
+
 
 # ---------------------------------------------------------------------------
 section("4. WIRING — the real endpoint actually returns 429")

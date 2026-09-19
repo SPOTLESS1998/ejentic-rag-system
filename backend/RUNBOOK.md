@@ -359,6 +359,32 @@ refuse gracefully with a `Retry-After` instead of the provider returning a raw
 
 `null` disables a window. `0` CLOSES it — a typo must not read as "unlimited".
 
+**Changing the limits without a rebuild.** Both windows are also readable from
+the environment, so the number you tune under pressure lives in
+`/etc/ejentic-rag/server.env` and needs only a restart:
+
+```bash
+MAX_REQUESTS_PER_MINUTE=60
+MAX_REQUESTS_PER_DAY=4000
+# then: sudo systemctl restart ejentic-rag.service
+```
+
+Unset or blank means "use the config" — **absence never means "no limit"**.
+Disabling a window takes the explicit word `off`, which logs a warning at boot.
+The active limits are printed at startup, so `docker logs` answers "what is this
+instance actually enforcing?" without a shell into the container:
+
+```
+[ratelimit] active limits: 30/per-minute, 500/per-day (per role; worst case 1,024,000 completion tokens/day/role)
+```
+
+> ⚠️ **One bucket per ROLE, not per person.** The public UI holds one guest key,
+> so every visitor shares the guest bucket — `max_requests_per_day` is the whole
+> public site's daily budget, not one visitor's. At 500 it takes roughly 50
+> visitors asking 10 questions each to exhaust the day, after which every
+> visitor sees a 429. Size it against expected **total** traffic before opening
+> the site up.
+
 **What a caller sees** when it goes over: HTTP `429` with a `Retry-After` header
 in whole seconds. Limits are per authenticated ROLE, so a compromised guest key
 cannot spend the executive tier's allowance. An unauthenticated request is

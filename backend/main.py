@@ -713,6 +713,14 @@ def _clearance_for(role: str, requested: str) -> str:
 # One limiter for the process. Buckets are keyed by the AUTHENTICATED role, so a
 # compromised guest key cannot spend the executive tier's allowance.
 LIMITER = ratelimit.limits_from_config(CFG)
+# Printed at import so `docker logs` answers "what limits is this instance
+# actually running?" without a shell into the container. A ceiling nobody can
+# see is a ceiling nobody checks.
+print(f"[ratelimit] active limits: "
+      + (", ".join(f"{w.limit}/{w.label}" for w in LIMITER.windows)
+         if LIMITER.enabled else "NONE — request count is unbounded")
+      + f" (per role; worst case {(CFG.get('max_requests_per_day') or 0) * MAX_OUTPUT_TOKENS:,}"
+        f" completion tokens/day/role)")
 
 
 def _rate_limit(role: str) -> None:
