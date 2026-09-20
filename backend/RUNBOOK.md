@@ -403,6 +403,75 @@ unbounded spend and an outage. Nobody but us can restart the process.
 
 ---
 
+## 5b. Deploying a change — BUILD FIRST, then restart
+
+**The unit does NOT build. You do.** `ExecStartPre=... build` was removed on
+2026-09-20 (see the unit file for the full reasoning). `systemctl restart` now
+only swaps containers, which takes seconds. Building is an explicit step you run
+while the site is still serving.
+
+```bash
+# 1. Ship the changed files (/opt/ejentic-rag is a FILE COPY — there is no .git)
+scp backend/*.py ubuntu@<server>:/opt/ejentic-rag/backend/
+
+# 2. Build while the site is still UP and serving. Takes 15-25 min cold.
+ssh ubuntu@<server> 'cd /opt/ejentic-rag && \
+  sudo docker compose --env-file /etc/ejentic-rag/server.env \
+    -f docker-compose.prod.yml build'
+
+# 3. Now swap onto the finished image. Seconds, not minutes.
+ssh ubuntu@<server> 'sudo systemctl restart ejentic-rag.service'
+
+# 4. PROVE what actually shipped — do not assume step 3 worked.
+ssh ubuntu@<server> 'docker logs ejentic-rag-backend-1 2>&1 | grep ratelimit'
+#   -> [ratelimit] active limits: 30/per-minute, 500/per-day (...)
+```
+
+**Step 4 is not optional.** Because the unit no longer rebuilds, `systemctl
+restart` alone does not guarantee you are running the code in
+`/opt/ejentic-rag`. This project already lost 25 hours to a stale build once.
+The backend prints its active config at boot precisely so you can check.
+
+Then run the full live verification (`deploy/verify_deploy.py`):
+
+```bash
+scp deploy/verify_deploy.py ubuntu@<server>:/tmp/
+ssh ubuntu@<server> 'docker cp /tmp/verify_deploy.py ejentic-rag-backend-1:/tmp/ && \
+  docker exec ejentic-rag-backend-1 python /tmp/verify_deploy.py'
+```
+
+> 🔴 **The outage this prevents, from 2026-09-20.** The unit used to run
+> `compose build` inside the start path, after `ExecStop` had already taken the
+> containers down — so every restart was an outage lasting as long as the build.
+> With `TimeoutStartSec=900` and a cold cache, systemd killed the build mid-way,
+> **nothing reached the layer cache**, and `Restart=always` began an identical
+> cold build. It could never converge. The site was down ~24 minutes until the
+> loop was broken by hand. It also filled the disk to 100% twice, on a box that
+> also serves client-facing `audit.ejentic.xyz`.
+
+> ⚠️ **Do not `docker builder prune` between building and deploying.** The cache
+> entries your build just created look "unused" until a container runs on them,
+> so pruning for disk headroom silently forces the next build to start cold.
+
+**Recovering a stuck deploy** (the site is down, or a build went wrong):
+
+```bash
+sudo systemctl stop ejentic-rag.service            # break any loop first
+cd /opt/ejentic-rag && sudo docker compose --env-file /etc/ejentic-rag/server.env \
+  -f docker-compose.prod.yml up -d --no-build      # back up on the PREVIOUS images
+```
+
+`--no-build` is load-bearing: it starts the last good images instead of
+re-entering the build that just failed. Service is restored in ~20s.
+
+> ⚠️ **Check disk before building — this box cannot hold two images plus cache.**
+> `27 GB in use + 10 GB new image + 10 GB build cache = 47 GB on a 45 GB disk.`
+> Run `df -h /` and `docker system df` first. After a successful swap, reclaim
+> with `docker image prune -f` (the superseded image) — but keep it until the
+> new one is verified, because it is your only fast rollback.
+
+---
+
 ## Quick reference — full rebuild from scratch
 
 ```bash

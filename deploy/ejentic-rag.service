@@ -25,19 +25,50 @@ EnvironmentFile=/etc/ejentic-rag/server.env
 ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml up --remove-orphans
 ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml down
 
-# Pull/build before starting, so `systemctl restart` after a `git pull` actually
-# runs the new code. Leaving this out is how a box ends up serving a stale build —
-# which already happened once in this project, for 25 hours.
-ExecStartPre=/usr/bin/docker compose -f docker-compose.prod.yml build
+# 🔴 BUILDING IS NOT IN THE START PATH — REMOVED 2026-09-20, AND THE ARITHMETIC
+# IS WHY. There used to be:
+#
+#     ExecStartPre=/usr/bin/docker compose -f docker-compose.prod.yml build
+#
+# It caused a total outage the first time it met a cold cache, and it cannot work
+# on this box at all. The backend image is ~10 GB (torch + a CUDA stack this
+# GPU-less box never uses). Building a new one while the old one is still held by
+# the running containers means BOTH exist, plus ~10 GB of build cache:
+#
+#     27 GB in use  +  10 GB new image  +  10 GB build cache  =  47 GB
+#     ...on a 45 GB disk.
+#
+# The disk hit 100% twice on 2026-09-20 doing exactly this, on a box that ALSO
+# serves client-facing audit.ejentic.xyz. A start path that can fill the disk of
+# an unrelated production service is not a start path.
+#
+# Worse, it was self-perpetuating: systemd killed the over-long build on timeout,
+# so nothing reached the layer cache, and Restart=always began an identical cold
+# build. 🧠 A start timeout shorter than the work, plus automatic restart, is not
+# "a slow start that recovers" — it is a loop that destroys the cache that would
+# have made the next attempt fast.
+#
+# WHAT REPLACES IT: building is now an explicit deploy step, done while the site
+# is still UP, and the restart merely swaps containers onto the finished image.
+# See RUNBOOK §5b. This is also strictly less downtime: seconds, not minutes.
+#
+# ⚠️ THE RISK THIS REINTRODUCES, STATED PLAINLY: `systemctl restart` alone no
+# longer guarantees you are running the code sitting in /opt/ejentic-rag. This
+# project already lost 25 hours to a stale build once. The mitigation is the
+# documented procedure in RUNBOOK §5b — build, THEN restart — plus the fact that
+# the backend prints its active config at boot, so `docker logs` will tell you
+# what actually shipped. Verify, do not assume.
 
-# An LLM container plus a first-boot model download is not fast. Give it room
-# rather than having systemd kill a healthy slow start.
+# An LLM container plus a first-boot model download is not fast, and a reboot
+# starts containers cold. Generous, but no longer covering a 25-minute build.
 TimeoutStartSec=900
 TimeoutStopSec=120
 
 # Restart on crash AND on reboot — this is the "works with a dead laptop" part.
+# Note the containers ALSO carry `restart: unless-stopped`, so the site survives
+# a reboot even if this unit is broken — two independent paths, deliberately.
 Restart=always
-RestartSec=10
+RestartSec=30
 
 [Install]
 WantedBy=multi-user.target
