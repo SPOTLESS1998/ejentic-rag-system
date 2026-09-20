@@ -38,7 +38,8 @@
 // the file that decides which backend key a request acts with, so being directly
 // testable is worth more here than matching the alias convention.
 import { loginEnabled, backendKeyForRole, keyEnvForRole, staffConfig } from "./staff.ts";
-import { sessionFromRequest } from "./session.ts";
+import { sessionFromRequest, cookieAttributes, cookieFromRequest } from "./session.ts";
+import { createHash, randomBytes } from "node:crypto";
 
 /** Base URL of the FastAPI backend. Server-side, so no NEXT_PUBLIC_ needed. */
 export const RAG_BASE_URL = (
@@ -56,6 +57,59 @@ export const RAG_BASE_URL = (
  * way: it records the value and grants nothing on the strength of it.
  */
 export const ACTOR_HEADER = "X-Actor";
+
+/**
+ * Header carrying WHICH BUCKET to meter this request against.
+ *
+ * The backend's rate limiter is two-tier: a ceiling per API key, and nested inside it
+ * a share per visitor. The public UI holds ONE shared guest key, so without this
+ * header every visitor on the internet shares a single bucket and the first heavy one
+ * exhausts the whole site's daily budget for everybody else.
+ *
+ * ⚠️ NOT identity, and never attribution. This is deliberately a different header from
+ * `X-Actor`: an actor is a person we authenticated, a visitor id is a bucket label.
+ * The public deployment's value is a random number attached to a browser — it names
+ * nobody, and it must never be written to the audit trail as though it did.
+ */
+export const VISITOR_HEADER = "X-Visitor-Id";
+
+/**
+ * Cookie holding the public deployment's visitor bucket id.
+ *
+ * ⚠️ NOT a session and NOT an auth token. It grants nothing, proves nothing, and is
+ * never checked against anything — deleting it costs a visitor nothing but a fresh
+ * rate-limit bucket. It carries NO personal data: the value is random bytes, minted
+ * without reading anything about the person, their request, or their address.
+ *
+ * It is HttpOnly for the same reason the session cookie is — page JavaScript (or an
+ * XSS) should not be able to read or rewrite it — but do not read that flag as a sign
+ * this is a credential. If you are here looking for "who is this user", this is the
+ * wrong cookie; on the public deployment the honest answer is that nobody knows.
+ */
+export const VISITOR_COOKIE = "rag_visitor";
+
+/**
+ * The contract with the backend: opaque, at most 64 chars, strictly `[A-Za-z0-9._-]`.
+ *
+ * Enforced on EVERY id before it goes out, including one read back from our own
+ * cookie. A cookie is client-controlled input — HttpOnly stops page scripts touching
+ * it, not a scripted client sending whatever it likes — so an unvalidated value would
+ * flow straight into an outbound request header, where a CR/LF would be header
+ * injection and a megabyte of junk would be an easy way to break the backend.
+ */
+const VISITOR_ID_PATTERN = /^[A-Za-z0-9._-]{1,64}$/;
+
+/**
+ * How long a visitor keeps the same bucket. Long, because a bucket that rotates often
+ * is a rate limit that resets often — the whole point is that the same browser lands
+ * in the same bucket tomorrow.
+ *
+ * Honest limit: a visitor who clears cookies, or a script that simply does not send
+ * one, gets a fresh bucket. This tier cannot stop that and is not trying to. It stops
+ * ONE ordinary heavy visitor from starving everyone else; the per-API-key ceiling it
+ * nests inside is what bounds the deliberate abuser.
+ */
+const VISITOR_COOKIE_MAX_AGE = 180 * 24 * 60 * 60;
 
 /** Who this request acts as, once resolved. */
 export interface Caller {
@@ -189,24 +243,114 @@ export function resolveCaller(request: Request): CallerResult {
   return { ok: true, caller: { key, role: current.role, actor: current.id } };
 }
 
+/** The rate-limit bucket this request is metered against, once resolved. */
+export interface Visitor {
+  /** Value for `X-Visitor-Id`. Always satisfies VISITOR_ID_PATTERN. */
+  id: string;
+  /**
+   * `Set-Cookie` the route must attach to its response, or null when there is
+   * nothing to persist (staff mode, or a public visitor who already has a usable
+   * cookie). Returned rather than written here because this module never sees a
+   * Response — the route owns that, exactly as it does for the session cookie.
+   */
+  setCookie: string | null;
+}
+
+/** A fresh bucket id: 24 random bytes as base64url — 32 chars, alphabet `[A-Za-z0-9_-]`,
+ *  so it is inside the contract's charset and well under the 64-char cap by
+ *  construction. 192 bits is far past any chance of two browsers colliding. */
+function mintVisitorId(): string {
+  return randomBytes(24).toString("base64url");
+}
+
 /**
- * Headers for an outbound backend call: the caller's key, their id for audit, plus a
- * caller-supplied upload token when one is present.
+ * Turn a staff id into a contract-valid bucket id.
  *
- * Note what is NOT forwarded: any client-sent `X-API-Key` or `X-Actor`. If we passed
- * the browser's headers through, a caller could supply their own key (or claim to be
- * someone else in the audit log) and the proxy would become the open door it exists
- * to close.
+ * `staffConfig()` already restricts ids to `[a-z0-9_-]`, which is inside the allowed
+ * charset, so the overwhelmingly common case is the id passed through untouched —
+ * and that is what makes the limit genuinely per-person.
+ *
+ * A pathological id (longer than 64 chars today, or some charset a future change to
+ * staff.ts permits) is hashed rather than truncated. Truncating would silently merge
+ * two people who share a 64-char prefix into one bucket, so each would see a limit
+ * they did not spend; a digest keeps one person to one bucket and stays stable across
+ * requests, which is the only property this value actually needs.
+ */
+function visitorIdForActor(actor: string): string {
+  if (VISITOR_ID_PATTERN.test(actor)) return actor;
+  return createHash("sha256").update(actor, "utf8").digest("hex").slice(0, 32);
+}
+
+/**
+ * Decide which bucket to meter this request against.
+ *
+ * PER-PERSON (staff): the signed-in person's own id — the same value that goes out as
+ * `actor` — so the limit is genuinely per person rather than per browser. No cookie is
+ * involved or needed; the session already says who this is, and a stale visitor cookie
+ * left in the browser by the public site is ignored outright.
+ *
+ * SINGLE-KEY (public): nobody is identified, so a random id is minted and persisted in
+ * a cookie to give the same browser the same bucket next time.
+ *
+ * WHAT IS NOT TRUSTED
+ * -------------------
+ * A client-sent `X-Visitor-Id` header is never consulted — see `backendHeaders`, which
+ * strips it. And the cookie, though it is ours, is validated on the way back in like
+ * any other client input: a value that does not match the contract is discarded and
+ * replaced rather than forwarded.
+ */
+export function resolveVisitor(request: Request, caller: Caller): Visitor {
+  // Staff mode. `caller.actor` is only ever set on the per-person branch, so this is
+  // the same condition that decides whether an actor is reported at all.
+  if (caller.actor) {
+    return { id: visitorIdForActor(caller.actor), setCookie: null };
+  }
+
+  const existing = cookieFromRequest(request, VISITOR_COOKIE);
+  if (existing !== null && VISITOR_ID_PATTERN.test(existing)) {
+    // Reuse, and do NOT re-issue the cookie: re-sending it on every response would
+    // slide the expiry forward and add a Set-Cookie to every streamed answer for no
+    // gain. The browser already holds it.
+    return { id: existing, setCookie: null };
+  }
+
+  const id = mintVisitorId();
+  return { id, setCookie: `${VISITOR_COOKIE}=${id}; ${cookieAttributes(VISITOR_COOKIE_MAX_AGE)}` };
+}
+
+/**
+ * Headers for an outbound backend call: the caller's key, their id for audit, the
+ * rate-limit bucket, plus a caller-supplied upload token when one is present.
+ *
+ * Note what is NOT forwarded: any client-sent `X-API-Key`, `X-Actor` or
+ * `X-Visitor-Id`. If we passed the browser's headers through, a caller could supply
+ * their own key (or claim to be someone else in the audit log) and the proxy would
+ * become the open door it exists to close. A caller choosing their own visitor id is
+ * the same failure in a smaller key: they would rotate it per request and never hit
+ * the per-visitor share at all.
  */
 export function backendHeaders(
   caller: Caller,
   extra: Record<string, string> = {},
   uploadToken?: string | null,
+  visitorId?: string | null,
 ): Record<string, string> {
   const out: Record<string, string> = { ...extra };
   if (caller.key) out["X-API-Key"] = caller.key;
   if (caller.actor) out[ACTOR_HEADER] = caller.actor;
   if (uploadToken) out["X-Upload-Token"] = uploadToken;
+
+  // Strip before setting, and compare case-insensitively: HTTP header names are
+  // case-insensitive but the keys of a plain object are not, so a `x-visitor-id`
+  // slipped in via `extra` would sail straight past a single `delete out[VISITOR_HEADER]`
+  // and reach the backend. Deleting unconditionally also covers the path where we have
+  // no id of our own to send — "we chose nothing" must not mean "the caller chose".
+  const wanted = VISITOR_HEADER.toLowerCase();
+  for (const k of Object.keys(out)) {
+    if (k.toLowerCase() === wanted) delete out[k];
+  }
+  if (visitorId) out[VISITOR_HEADER] = visitorId;
+
   return out;
 }
 

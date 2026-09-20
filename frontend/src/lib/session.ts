@@ -160,10 +160,17 @@ export function readSession(
   return { session: { id, role, exp } };
 }
 
-/** Cookie attributes. Assembled here so every place that sets or clears the cookie
- *  cannot disagree about the flags — a logout that clears a cookie with different
- *  attributes than the one that was set does not clear it at all. */
-function cookieAttributes(maxAge: number): string {
+/**
+ * Cookie attributes. Assembled here so every place that sets or clears the cookie
+ * cannot disagree about the flags — a logout that clears a cookie with different
+ * attributes than the one that was set does not clear it at all.
+ *
+ * Exported because the visitor-bucket cookie in rag-proxy.ts must carry exactly
+ * these flags, including the `RAG_COOKIE_INSECURE` escape hatch. Sharing the one
+ * function is the point: a second cookie with its own hand-written flag list is how
+ * a deployment ends up with one cookie Secure and the other not.
+ */
+export function cookieAttributes(maxAge: number): string {
   // Secure by DEFAULT, opt OUT for local http. The reverse (opt in) means a
   // deployment that forgets one variable ships session cookies over plain HTTP.
   const insecure = (process.env.RAG_COOKIE_INSECURE ?? "").trim() === "1";
@@ -191,18 +198,31 @@ export function sessionClearCookie(): string {
   return `${SESSION_COOKIE}=; ${cookieAttributes(0)}`;
 }
 
-/** Pull the session cookie out of a request. */
-export function sessionFromRequest(request: Request, now = Date.now()) {
+/**
+ * Read one named cookie's raw value off a request, or null when it is not there.
+ *
+ * Parses conservatively: split on ";", take the first EXACT name match. The name is
+ * compared whole, so `rag_session_other=` and `xrag_session=` are not matches — a
+ * prefix/suffix match would let an attacker-chosen cookie shadow a real one.
+ *
+ * Returns the value verbatim: validating it is the caller's job, because what counts
+ * as valid differs per cookie (a signature here, a charset for the visitor bucket).
+ */
+export function cookieFromRequest(request: Request, name: string): string | null {
   const header = request.headers.get("cookie") ?? "";
-  // Parse conservatively: split on ";", take the first exact name match. Cookie
-  // values here are base64url + ".", so they never contain "=" ambiguity beyond
-  // the first separator.
   for (const part of header.split(";")) {
     const item = part.trim();
     const eq = item.indexOf("=");
     if (eq < 1) continue;
-    if (item.slice(0, eq) !== SESSION_COOKIE) continue;
-    return readSession(item.slice(eq + 1), now);
+    if (item.slice(0, eq) !== name) continue;
+    return item.slice(eq + 1);
   }
-  return { session: null as null, failure: "absent" as SessionFailure };
+  return null;
+}
+
+/** Pull the session cookie out of a request. */
+export function sessionFromRequest(request: Request, now = Date.now()) {
+  const raw = cookieFromRequest(request, SESSION_COOKIE);
+  if (raw === null) return { session: null as null, failure: "absent" as SessionFailure };
+  return readSession(raw, now);
 }

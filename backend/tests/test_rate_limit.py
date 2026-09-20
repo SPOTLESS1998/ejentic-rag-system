@@ -133,8 +133,10 @@ try:
     check("Retry-After reflects the LONGER of the two windows", False, "not refused")
 except ratelimit.RateLimitError as e:
     check("Retry-After reflects the LONGER of the two windows",
-          e.retry_after > 60 and e.window == "per-day",
+          e.retry_after > 60 and e.window.endswith("per-day"),
           f"retry_after={e.retry_after}s window={e.window}")
+    check("the window label names the TIER that refused, not just the window",
+          e.window == "credential:per-day", f"window={e.window}")
 
 # Memory is bounded by construction — the thing this module exists to guarantee
 # must be true OF this module too.
@@ -345,6 +347,294 @@ try:
         check("...and the limit still applies to it afterwards",
               client.post("/api/rag", json={"query": "mine"},
                           headers=h).status_code == 429)
+finally:
+    undo()
+
+# ---------------------------------------------------------------------------
+section("6. the per-VISITOR share, nested inside the credential ceiling")
+# ---------------------------------------------------------------------------
+# The problem this solves: the public UI holds ONE shared guest key, so keying
+# only by credential makes max_requests_per_day the whole site's daily budget
+# rather than one visitor's.
+
+
+def _tier(ceil_min=None, ceil_day=None, vis_min=None, vis_day=None):
+    return ratelimit.TieredRateLimiter(
+        ceiling=ratelimit.RateLimiter(ceil_min, ceil_day, tier="credential"),
+        share=ratelimit.RateLimiter(vis_min, vis_day, fail_open=True, tier="visitor"))
+
+
+def _admit_t(t, role, visitor=None, now=0.0):
+    try:
+        t.admit(role, visitor, now=now)
+        return True
+    except ratelimit.RateLimitError:
+        return False
+
+
+# One visitor exhausting its share must NOT lock out the others.
+t = _tier(ceil_min=100, vis_min=3)
+check("a visitor is served up to its own share",
+      all(_admit_t(t, "guest", "alice", now=i * 0.1) for i in range(3)))
+check("that visitor is then refused", not _admit_t(t, "guest", "alice", now=0.4))
+check("A DIFFERENT visitor on the SAME key is unaffected",
+      _admit_t(t, "guest", "bob", now=0.4))
+check("...and a third, proving the key's budget was not consumed by alice",
+      _admit_t(t, "guest", "carol", now=0.4))
+
+# The ceiling still binds. This is what stops the forgeable visitor id becoming
+# an escape hatch.
+t = _tier(ceil_min=5, vis_min=2)
+for i in range(5):
+    _admit_t(t, "guest", f"visitor-{i}", now=0.0)   # 5 distinct visitors, 1 each
+check("the CREDENTIAL ceiling still refuses once the key's total is reached",
+      not _admit_t(t, "guest", "someone-new", now=0.0))
+check("rotating visitor ids does NOT buy more than the ceiling allows",
+      not _admit_t(t, "guest", "another-fresh-id", now=0.0))
+
+# WHICH tier refused has to be distinguishable — they mean different things. A
+# credential refusal affects everyone on that key; a visitor refusal affects one.
+t = _tier(ceil_min=100, vis_min=1)
+_admit_t(t, "guest", "alice", now=0.0)
+try:
+    t.admit("guest", "alice", now=0.0)
+    check("a visitor-tier refusal is reported as such", False, "not refused")
+except ratelimit.RateLimitError as e:
+    check("a visitor-tier refusal is reported as such",
+          e.window.startswith("visitor:"), f"window={e.window}")
+    check("its message says the limit is per visitor, not per credential",
+          "visitor" in e.detail, f"detail={e.detail!r}")
+
+t = _tier(ceil_min=1, vis_min=100)
+_admit_t(t, "guest", "alice", now=0.0)
+try:
+    t.admit("guest", "bob", now=0.0)
+    check("a ceiling refusal is reported as credential-tier", False, "not refused")
+except ratelimit.RateLimitError as e:
+    check("a ceiling refusal is reported as credential-tier",
+          e.window.startswith("credential:"), f"window={e.window}")
+
+# The ceiling is the more serious condition, so it must win the report when both
+# would refuse — its Retry-After is the one that is actually true for the caller.
+t = _tier(ceil_min=1, vis_min=1)
+_admit_t(t, "guest", "alice", now=0.0)
+try:
+    t.admit("guest", "alice", now=0.0)
+    check("when BOTH tiers refuse, the ceiling is reported", False, "not refused")
+except ratelimit.RateLimitError as e:
+    check("when BOTH tiers refuse, the ceiling is reported",
+          e.window.startswith("credential:"), f"window={e.window}")
+
+# ATOMICITY ACROSS TIERS — same rule as across windows. Charging the ceiling for
+# a request the visitor tier then refuses spends budget on a request never run.
+t = _tier(ceil_min=100, vis_min=1)
+_admit_t(t, "guest", "alice", now=0.0)
+before = t.snapshot("guest", "alice", now=0.0)["credential"]["per-minute"]["used"]
+_admit_t(t, "guest", "alice", now=0.0)          # refused by the visitor tier
+after = t.snapshot("guest", "alice", now=0.0)["credential"]["per-minute"]["used"]
+check("a visitor-tier refusal does NOT charge the credential ceiling",
+      before == after == 1, f"before={before} after={after}")
+
+# Buckets are namespaced by role, so the same visitor id under two roles is two
+# buckets — otherwise a guest could drain an executive's visitor allowance.
+t = _tier(ceil_min=100, vis_min=1)
+_admit_t(t, "guest", "same-id", now=0.0)
+check("the same visitor id under a DIFFERENT role is a different bucket",
+      _admit_t(t, "executive", "same-id", now=0.0))
+
+# No id presented => ceiling only. The honest fallback: we cannot fairly share
+# what we cannot distinguish, and refusing would punish the caller for metadata
+# we failed to supply.
+t = _tier(ceil_min=3, vis_min=1)
+check("with NO visitor id, only the ceiling applies",
+      all(_admit_t(t, "guest", None, now=i * 0.1) for i in range(3)))
+check("...and the ceiling still stops it", not _admit_t(t, "guest", None, now=0.4))
+
+
+# ---------------------------------------------------------------------------
+section("7. the visitor id is caller-supplied, so it is sanitised")
+# ---------------------------------------------------------------------------
+check("a normal id survives", ratelimit.clean_visitor_id("abc-123_x.y") == "abc-123_x.y")
+check("surrounding whitespace is stripped",
+      ratelimit.clean_visitor_id("  abc  ") == "abc")
+for bad, why in [(None, "absent"), ("", "empty"), ("   ", "whitespace only"),
+                 ("a" * 65, "too long"), ("has space", "space"),
+                 ("semi;colon", "punctuation"), ("nul\x00byte", "NUL"),
+                 ("new\nline", "CRLF"), ("../../etc", "traversal"),
+                 ("<script>", "HTML"), ("emoji😀", "non-ASCII"),
+                 ("a\x00b", "separator char we join on")]:
+    check(f"rejected: {why}", ratelimit.clean_visitor_id(bad) is None,
+          f"got={ratelimit.clean_visitor_id(bad)!r}")
+check("exactly 64 chars is accepted (boundary)",
+      ratelimit.clean_visitor_id("a" * 64) == "a" * 64)
+check("65 is rejected, NOT truncated — a truncated id would merge two visitors",
+      ratelimit.clean_visitor_id("a" * 65) is None)
+
+# A rejected id degrades to ceiling-only rather than refusing the request.
+t = _tier(ceil_min=5, vis_min=1)
+check("an UNUSABLE visitor id falls back to ceiling-only, it does not refuse",
+      _admit_t(t, "guest", "bad id!", now=0.0)
+      and _admit_t(t, "guest", "also bad!", now=0.1))
+
+# The \x00 join must be unambiguous: no sanitised id can contain it, so
+# "role" + id can never be confused with a different (role, id) pair.
+check("the namespace separator cannot appear in a sanitised id",
+      ratelimit.clean_visitor_id("a\x00b") is None)
+
+
+# ---------------------------------------------------------------------------
+section("8. the two tiers fail in OPPOSITE directions at the bucket cap")
+# ---------------------------------------------------------------------------
+# The ceiling is the cost guarantee, so an untracked bucket there means we cannot
+# bound spend => refuse. The share tier only refines fairness, and the ceiling is
+# still enforced beneath it, so refusing legitimate visitors there would be a
+# self-inflicted outage => allow, degrading to ceiling-only.
+_saved = ratelimit.MAX_BUCKETS
+try:
+    ratelimit.MAX_BUCKETS = 3
+    ceil = ratelimit.RateLimiter(100, None, fail_open=False, tier="credential")
+    for i in range(3):
+        ceil.admit(f"role-{i}", now=0.0)
+    try:
+        ceil.admit("role-overflow", now=0.0)
+        check("CEILING tier fails CLOSED past the bucket cap", False, "admitted")
+    except ratelimit.RateLimitError:
+        check("CEILING tier fails CLOSED past the bucket cap", True)
+
+    share = ratelimit.RateLimiter(100, None, fail_open=True, tier="visitor")
+    for i in range(3):
+        share.admit(f"v-{i}", now=0.0)
+    try:
+        share.admit("v-overflow", now=0.0)
+        check("SHARE tier fails OPEN past the bucket cap "
+              "(ceiling still applies, so fairness degrades, cost does not)", True)
+    except ratelimit.RateLimitError:
+        check("SHARE tier fails OPEN past the bucket cap", False, "refused")
+
+    # And end-to-end: flooding distinct visitor ids must not be able to lock the
+    # site out — it must only ever hit the ceiling.
+    t = _tier(ceil_min=500, vis_min=1)
+    outcomes = [_admit_t(t, "guest", f"flood-{i}", now=0.0) for i in range(40)]
+    check("a visitor-id flood never produces a share-tier lockout",
+          all(outcomes), f"refused={outcomes.count(False)}")
+finally:
+    ratelimit.MAX_BUCKETS = _saved
+
+# Empty buckets are swept, so visitor memory tracks ACTIVE visitors rather than
+# every visitor ever seen — the tier is keyed by something unbounded over time.
+_saved = ratelimit.MAX_BUCKETS
+try:
+    ratelimit.MAX_BUCKETS = 20
+    w = ratelimit._Window(2, 60.0, "per-minute", fail_open=True)
+    for i in range(15):
+        w.would_refuse(f"old-{i}", 0.0)
+        w.record(f"old-{i}", 0.0)
+    grew = len(w._log)
+    w.would_refuse("later", 10_000.0)      # every old window has aged out
+    check("the bucket table is swept once it grows, not left to accumulate",
+          len(w._log) < grew, f"{grew} -> {len(w._log)}")
+    # The sweep must key on staleness, not emptiness. A stale bucket is NOT
+    # empty — it is full of timestamps nobody has examined. Getting this wrong
+    # meant the table filled up and, because the share tier fails open, the
+    # per-visitor limit silently stopped working for good.
+    check("...and it is the STALE ones that went, leaving the live one",
+          len(w._log) == 1 and "later" in w._log, f"keys={sorted(w._log)[:4]}")
+    # A bucket still inside its window must survive a sweep, or the limiter
+    # would forget an active visitor and hand them a fresh allowance.
+    w2 = ratelimit._Window(2, 60.0, "per-minute", fail_open=True)
+    for i in range(15):
+        w2.would_refuse(f"v-{i}", 0.0)
+        w2.record(f"v-{i}", 0.0)
+    w2.would_refuse("newcomer", 1.0)       # 1s later: everyone is still active
+    check("an ACTIVE bucket is never swept", len(w2._log) == 16,
+          f"len={len(w2._log)}")
+finally:
+    ratelimit.MAX_BUCKETS = _saved
+
+
+# ---------------------------------------------------------------------------
+section("9. the visitor tier is config-driven and can be turned off")
+# ---------------------------------------------------------------------------
+for k in ("max_requests_per_visitor_per_minute", "max_requests_per_visitor_per_day"):
+    check(f"{k} is in DEFAULT_CONFIG", k in registry.DEFAULT_CONFIG)
+_c = base_cfg()
+check("a tenant config that never mentions them still inherits them",
+      bool(_c.get("max_requests_per_visitor_per_minute"))
+      and bool(_c.get("max_requests_per_visitor_per_day")))
+check("the per-visitor share is TIGHTER than the credential ceiling "
+      "(otherwise it can never bind)",
+      _c["max_requests_per_visitor_per_day"] < _c["max_requests_per_day"]
+      and _c["max_requests_per_visitor_per_minute"] <= _c["max_requests_per_minute"],
+      f"visitor {_c['max_requests_per_visitor_per_minute']}/min "
+      f"{_c['max_requests_per_visitor_per_day']}/day vs role "
+      f"{_c['max_requests_per_minute']}/min {_c['max_requests_per_day']}/day")
+
+_live = ratelimit.tiered_from_config(_c)
+check("tiered_from_config builds both tiers",
+      _live.ceiling.enabled and _live.share.enabled)
+check("the share tier is fail-open, the ceiling is not",
+      all(w.fail_open for w in _live.share.windows)
+      and not any(w.fail_open for w in _live.ceiling.windows))
+check("how many heavy visitors it takes to exhaust the day is a real number",
+      (_c["max_requests_per_day"] // _c["max_requests_per_visitor_per_day"]) >= 1,
+      f"{_c['max_requests_per_day'] // _c['max_requests_per_visitor_per_day']} "
+      f"visitors at their full daily share")
+
+with env(MAX_REQUESTS_PER_VISITOR_PER_MINUTE="4"):
+    check("MAX_REQUESTS_PER_VISITOR_PER_MINUTE overrides config",
+          ratelimit.visitor_limits_from_config(_c).windows[0].limit == 4)
+with env(MAX_REQUESTS_PER_VISITOR_PER_MINUTE="off",
+         MAX_REQUESTS_PER_VISITOR_PER_DAY="off"):
+    _off = ratelimit.tiered_from_config(_c)
+    check("the visitor tier can be disabled entirely", not _off.share.enabled)
+    check("disabling it leaves the credential ceiling intact", _off.ceiling.enabled)
+    check("...and requests still flow, limited only by the ceiling",
+          _admit_t(_off, "guest", "alice", now=0.0))
+
+
+# ---------------------------------------------------------------------------
+section("10. WIRING — the real endpoint honours X-Visitor-Id")
+# ---------------------------------------------------------------------------
+# Everything in sections 6-9 passes if main.py never reads the header. This is
+# the only part that would notice.
+_calls3 = {"answer": 0}
+
+
+async def _spy_answer3(*a, **kw):
+    _calls3["answer"] += 1
+    return "an answer", m.TokenMeter(), False, 0
+
+
+_tiny3 = ratelimit.TieredRateLimiter(
+    ceiling=ratelimit.RateLimiter(100, None, tier="credential"),
+    share=ratelimit.RateLimiter(2, None, fail_open=True, tier="visitor"))
+client, _mod, undo = test_client(answer_once=_spy_answer3,
+                                 retrieve_and_rerank=_spy_retrieve,
+                                 LIMITER=_tiny3)
+try:
+    with env(RAG_KEY_GUEST=_GUEST_KEY):
+        def q(vid=None):
+            h = {"X-API-Key": _GUEST_KEY}
+            if vid:
+                h["X-Visitor-Id"] = vid
+            return client.post("/api/rag", json={"query": "hi"}, headers=h).status_code
+
+        check("alice is served her share", [q("alice"), q("alice")] == [200, 200])
+        check("alice is then 429'd by the VISITOR tier", q("alice") == 429)
+        check("WIRING: bob is still served — the header really is read",
+              q("bob") == 200, "if main.py ignored the header, bob would be 429")
+        check("bob gets his own full share", q("bob") == 200)
+        check("...then bob is limited too", q("bob") == 429)
+        # A caller with no header falls back to ceiling-only, so it must not be
+        # caught by another visitor's exhausted bucket.
+        check("a request with NO X-Visitor-Id is not caught by alice's bucket",
+              q(None) == 200)
+        # The streaming endpoint is a separate handler — a guard wired into one
+        # path and not the other is the classic near-miss.
+        r = client.post("/chat", json={"query": "hi"},
+                        headers={"X-API-Key": _GUEST_KEY, "X-Visitor-Id": "alice"})
+        check("/chat honours the visitor tier too", r.status_code == 429,
+              f"status={r.status_code}")
 finally:
     undo()
 

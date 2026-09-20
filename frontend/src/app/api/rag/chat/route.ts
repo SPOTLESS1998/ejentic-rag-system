@@ -8,7 +8,14 @@
  * On the internal deployment the key depends on WHO is signed in (resolveCaller), so
  * an unauthenticated request is a 401 here rather than a public-tier answer.
  */
-import { backendHeaders, callerError, passThroughError, resolveCaller, RAG_BASE_URL } from "@/lib/rag-proxy";
+import {
+  backendHeaders,
+  callerError,
+  passThroughError,
+  resolveCaller,
+  resolveVisitor,
+  RAG_BASE_URL,
+} from "@/lib/rag-proxy";
 
 /** Never prerender or cache: every call is a live stream. */
 export const dynamic = "force-dynamic";
@@ -16,6 +23,16 @@ export const dynamic = "force-dynamic";
 export async function POST(request: Request) {
   const resolved = resolveCaller(request);
   if (!resolved.ok) return callerError(resolved);
+
+  // Which rate-limit bucket this request is metered against. On the public
+  // deployment this may mint a new id, which then has to reach the browser — so
+  // `visitor.setCookie` is attached to both responses that follow a backend call,
+  // the error one included: a visitor whose first answer is refused must keep the
+  // bucket it was refused in, or every retry would arrive as a brand-new visitor.
+  //
+  // The two 400s below deliberately skip it. They never reach the backend, so no
+  // bucket was spent and there is nothing yet worth remembering.
+  const visitor = resolveVisitor(request, resolved.caller);
 
   let body: { query?: string; clearance_level?: string; platform?: string };
   try {
@@ -38,6 +55,7 @@ export async function POST(request: Request) {
       resolved.caller,
       { "Content-Type": "application/json", Accept: "text/event-stream" },
       request.headers.get("X-Upload-Token"),
+      visitor.id,
     ),
     body: JSON.stringify({
       query,
@@ -50,7 +68,9 @@ export async function POST(request: Request) {
   });
 
   if (!upstream.ok || !upstream.body) {
-    return passThroughError(upstream);
+    const errored = await passThroughError(upstream);
+    if (visitor.setCookie) errored.headers.append("Set-Cookie", visitor.setCookie);
+    return errored;
   }
 
   return new Response(upstream.body, {
@@ -62,6 +82,8 @@ export async function POST(request: Request) {
       // Without this an nginx/proxy in front will buffer the whole stream and the
       // answer arrives all at once, which reads as a hang.
       "X-Accel-Buffering": "no",
+      // Safe on a streamed response: headers are flushed before the first chunk.
+      ...(visitor.setCookie ? { "Set-Cookie": visitor.setCookie } : {}),
     },
   });
 }

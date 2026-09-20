@@ -5,7 +5,14 @@
  * stored filename and enforces the size cap) and returns the `upload_token` the
  * browser must present to query its own document.
  */
-import { backendHeaders, callerError, passThroughError, resolveCaller, RAG_BASE_URL } from "@/lib/rag-proxy";
+import {
+  backendHeaders,
+  callerError,
+  passThroughError,
+  resolveCaller,
+  resolveVisitor,
+  RAG_BASE_URL,
+} from "@/lib/rag-proxy";
 
 export const dynamic = "force-dynamic";
 
@@ -14,6 +21,10 @@ export async function POST(request: Request) {
   // refused without this process first buffering a file it will discard.
   const resolved = resolveCaller(request);
   if (!resolved.ok) return callerError(resolved);
+
+  // Which rate-limit bucket to meter against. Resolved from the same request, before
+  // the body is touched, so an upload is charged to the same visitor its chats are.
+  const visitor = resolveVisitor(request, resolved.caller);
 
   const form = await request.formData();
   const file = form.get("file");
@@ -30,11 +41,16 @@ export async function POST(request: Request) {
   // boundary, and a hand-written value omits the boundary the parser needs.
   const res = await fetch(`${RAG_BASE_URL}/upload`, {
     method: "POST",
-    headers: backendHeaders(resolved.caller),
+    headers: backendHeaders(resolved.caller, {}, null, visitor.id),
     body: out,
     signal: request.signal,
   });
 
-  if (!res.ok) return passThroughError(res);
-  return Response.json(await res.json());
+  // Attach on both paths, for the same reason as /chat: a refused upload must not
+  // hand the visitor a fresh bucket to retry in.
+  const response = res.ok
+    ? Response.json(await res.json())
+    : await passThroughError(res);
+  if (visitor.setCookie) response.headers.append("Set-Cookie", visitor.setCookie);
+  return response;
 }

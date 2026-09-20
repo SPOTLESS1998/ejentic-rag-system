@@ -330,8 +330,32 @@ so change them as a set and redo the arithmetic when you do.
 |---|---|---|
 | `max_query_chars` | 2000 | How big one question can be |
 | `max_output_tokens` | 2048 | How long one answer can run |
-| `max_requests_per_minute` | 30 | Burst, per role |
-| `max_requests_per_day` | 500 | Sustained use, per role (rolling 24h) |
+| `max_requests_per_minute` | 30 | Burst, per **role** (the ceiling) |
+| `max_requests_per_day` | 500 | Sustained use, per **role**, rolling 24h |
+| `max_requests_per_visitor_per_minute` | 10 | Burst, per **visitor** |
+| `max_requests_per_visitor_per_day` | 50 | Sustained use, per **visitor**, rolling 24h |
+
+**Two tiers, nested.** The ceiling is keyed by the authenticated role and bounds
+total spend. Inside it, a share keyed by `X-Visitor-Id` stops any one visitor
+taking a disproportionate slice of a shared key's allowance. Both must admit.
+
+This matters because the public UI holds **one** guest key. Without the visitor
+tier, every visitor shares a single bucket and `max_requests_per_day` is the
+whole site's daily budget rather than one person's. With it, at the shipped
+defaults it takes `500 ÷ 50 = 10` visitors each using their **full** daily share
+to exhaust the day — and normal visitors use a fraction of it.
+
+🧠 **Why a forgeable id is still useful.** `X-Visitor-Id` arrives in a header, so
+anyone holding the API key can rotate it. That would be fatal if it were the only
+limit. It is fine here because the **ceiling is keyed by the API key, which
+cannot be forged**: rotating visitor ids buys unlimited *visitor* buckets and
+still hits the *credential* ceiling. The unforgeable identity enforces the
+ceiling; the forgeable one only refines fairness beneath it.
+
+The two tiers therefore fail in **opposite directions** when the bucket table is
+full: the ceiling refuses (it is the cost guarantee), the share tier allows and
+degrades to ceiling-only (refusing legitimate visitors would be a self-inflicted
+outage, and nothing about cost is lost).
 
 **The arithmetic that matters**, with the shipped defaults:
 
@@ -378,12 +402,13 @@ instance actually enforcing?" without a shell into the container:
 [ratelimit] active limits: 30/per-minute, 500/per-day (per role; worst case 1,024,000 completion tokens/day/role)
 ```
 
-> ⚠️ **One bucket per ROLE, not per person.** The public UI holds one guest key,
-> so every visitor shares the guest bucket — `max_requests_per_day` is the whole
-> public site's daily budget, not one visitor's. At 500 it takes roughly 50
-> visitors asking 10 questions each to exhaust the day, after which every
-> visitor sees a 429. Size it against expected **total** traffic before opening
-> the site up.
+> ⚠️ **One bucket per ROLE at the ceiling — sized for the whole site.** The
+> public UI holds one guest key, so `max_requests_per_day` is the site's total
+> daily budget. The per-visitor tier stops one person eating it, but the ceiling
+> is still what runs out. Size it against expected **total** traffic before
+> opening the site up, and remember `X-Visitor-Id` only works if the proxy is
+> sending it — check with:
+> `docker logs ejentic-rag-backend-1 | grep ratelimit`
 
 **What a caller sees** when it goes over: HTTP `429` with a `Retry-After` header
 in whole seconds. Limits are per authenticated ROLE, so a compromised guest key

@@ -103,6 +103,15 @@ DEFAULT_CONFIG: dict[str, Any] = {
     # number is a fact about one deployment and does not belong in the defaults.
     "max_requests_per_minute": 30,
     "max_requests_per_day": 500,
+    # Per-VISITOR share, nested INSIDE the ceiling above (see ratelimit.py).
+    # The ceiling alone is the wrong shape for a public site: the public UI holds
+    # ONE shared guest key, so without this every visitor lands in the same
+    # bucket and max_requests_per_day becomes the whole site's daily budget
+    # rather than one visitor's. Sized for one human — a person asking more than
+    # ~10 questions a minute is not reading the answers. `null` disables the tier
+    # and returns the system to ceiling-only behaviour.
+    "max_requests_per_visitor_per_minute": 10,
+    "max_requests_per_visitor_per_day": 50,
     # --- Ingestion ---
     "chunk_size": 500,
     "chunk_overlap": 50,

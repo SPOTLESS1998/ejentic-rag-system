@@ -15,6 +15,7 @@ import {
   hasApiKey,
   passThroughError,
   resolveCaller,
+  resolveVisitor,
   RAG_BASE_URL,
 } from "@/lib/rag-proxy";
 import { loginEnabled, staffStatus } from "@/lib/staff";
@@ -47,14 +48,22 @@ export async function GET(request: Request) {
     );
   }
 
+  // The UI calls this on load, so it is where a first-time public visitor picks up a
+  // bucket cookie — before they have asked anything, rather than on their first chat.
+  const visitor = resolveVisitor(request, resolved.caller);
+
   const res = await fetch(`${RAG_BASE_URL}/whoami`, {
     method: "GET",
-    headers: backendHeaders(resolved.caller),
+    headers: backendHeaders(resolved.caller, {}, null, visitor.id),
     signal: request.signal,
     cache: "no-store",
   });
 
-  if (!res.ok) return passThroughError(res);
+  if (!res.ok) {
+    const errored = await passThroughError(res);
+    if (visitor.setCookie) errored.headers.append("Set-Cookie", visitor.setCookie);
+    return errored;
+  }
 
   const data = (await res.json()) as Record<string, unknown>;
   // `key_configured` lets the UI distinguish "no key set in this deployment" from
@@ -64,7 +73,11 @@ export async function GET(request: Request) {
   // `problems` surfaces staff who are configured but cannot be served (e.g. a role
   // with no backend key). A half-configured deployment should be visible here rather
   // than discovered by the one person who cannot sign in.
-  return Response.json({
+  //
+  // The visitor id is deliberately NOT in this body. It is a rate-limit bucket, not an
+  // identity, and "who am I?" must keep answering `actor: null` on the public site —
+  // publishing a browser id here is how it starts getting treated as a user id.
+  const body = Response.json({
     ...data,
     signed_in: resolved.caller.actor !== null,
     actor: resolved.caller.actor,
@@ -72,4 +85,6 @@ export async function GET(request: Request) {
     key_configured: hasApiKey(),
     ...(loginEnabled() ? { staff_problems: staffStatus().problems } : {}),
   });
+  if (visitor.setCookie) body.headers.append("Set-Cookie", visitor.setCookie);
+  return body;
 }

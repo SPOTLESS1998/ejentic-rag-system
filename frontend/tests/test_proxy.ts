@@ -27,14 +27,23 @@
  *   • THE PROXY, NOT THE CALLER, CHOOSES THE KEY — backendHeaders must let the caller's
  *     resolved key and actor OVERWRITE anything a route accidentally passed through, so
  *     a client-supplied X-API-Key can never reach the backend.
+ *
+ *   • THE PROXY, NOT THE CALLER, CHOOSES THE RATE-LIMIT BUCKET — same property, smaller
+ *     key. A caller who can name their own X-Visitor-Id rotates it per request and the
+ *     per-visitor share stops existing. So the header is stripped on the way out, the
+ *     cookie it comes from is re-validated on the way in, and staff are bucketed by the
+ *     person id rather than by a browser.
  */
 import {
   resolveCaller,
+  resolveVisitor,
   backendHeaders,
   hasApiKey,
   callerError,
   passThroughError,
   ACTOR_HEADER,
+  VISITOR_HEADER,
+  VISITOR_COOKIE,
   RAG_BASE_URL,
   type CallerResult,
   type Caller,
@@ -417,6 +426,274 @@ section("RAG_BASE_URL is normalised");
   // with no trailing slash (the proxy appends paths like `${RAG_BASE_URL}/chat`).
   check("RAG_BASE_URL is a non-empty string", typeof RAG_BASE_URL === "string" && RAG_BASE_URL.length > 0);
   check("RAG_BASE_URL has no trailing slash", !RAG_BASE_URL.endsWith("/"));
+}
+
+// ── THE VISITOR BUCKET: X-Visitor-Id ────────────────────────────────────────────
+// The backend meters a per-API-key ceiling with a per-visitor share nested inside it.
+// The public UI holds ONE shared guest key, so without a per-visitor id every visitor
+// on the internet shares one bucket and the first heavy one starves the site for the
+// day. These prove the id is chosen by the proxy, is stable per browser, and is never
+// mistaken for identity.
+
+/** Build a request carrying arbitrary raw cookies and/or headers. The `requestWith`
+ *  helper above only speaks session cookies; these tests need to forge both. */
+function rawRequest(opts: { cookie?: string; headers?: Record<string, string> } = {}): Request {
+  const headers: Record<string, string> = { "content-type": "application/json", ...(opts.headers ?? {}) };
+  if (opts.cookie !== undefined) headers["cookie"] = opts.cookie;
+  return new Request("http://public.local/api/rag/chat", { method: "POST", headers });
+}
+
+/** Pull one cookie's value out of a Set-Cookie string. */
+function setCookieValue(setCookie: string, name: string): string | null {
+  const m = new RegExp(`(?:^|;\\s*)${name}=([^;]*)`).exec(setCookie);
+  return m ? m[1] : null;
+}
+
+/**
+ * A request whose Cookie header carries bytes a real `Request` would never hold.
+ *
+ * undici validates header values in the constructor, so a CRLF-bearing cookie cannot
+ * be built the normal way (the injection test asserts exactly that). Handing
+ * `resolveVisitor` the header directly is the only way to exercise OUR check against
+ * such a value — which is the point: the check must stand on its own, not lean on the
+ * runtime happening to be strict.
+ */
+function requestWithRawCookie(raw: string): Request {
+  return {
+    headers: { get: (name: string) => (name.toLowerCase() === "cookie" ? raw : null) },
+  } as unknown as Request;
+}
+
+/** A resolved single-key (public) caller: no person, so the visitor cookie branch. */
+const PUBLIC_CALLER: Caller = { key: "guest-key", role: null, actor: null };
+
+/** The contract, restated here literally rather than imported. A test that asserts a
+ *  value against the very regex the code used to build it proves nothing; this is the
+ *  spec written out by hand so a change to the code's pattern shows up as a failure. */
+const CONTRACT = /^[A-Za-z0-9._-]{1,64}$/;
+
+/** Resolve a public-mode visitor for the given request. */
+function publicVisitor(request: Request) {
+  const r = resolveCaller(request);
+  if (!r.ok) throw new Error("expected public mode to resolve");
+  return { visitor: resolveVisitor(request, r.caller), caller: r.caller };
+}
+
+section("backendHeaders never forwards a client-supplied X-Visitor-Id");
+{
+  // THE CORE PROPERTY. A caller who chooses their own bucket label rotates it on every
+  // request and never reaches the per-visitor limit — the same class of failure as
+  // supplying your own API key, which is why it is stripped in the same place.
+  const caller: Caller = { key: "resolved-key", role: null, actor: null };
+  const out = backendHeaders(caller, { [VISITOR_HEADER]: "attacker-chosen-bucket" }, null, "ours-12345");
+  check("a client-supplied X-Visitor-Id is overwritten by the proxy's own",
+    out[VISITOR_HEADER] === "ours-12345");
+  check("  ...and the attacker's value appears nowhere in the outbound headers",
+    !JSON.stringify(out).includes("attacker-chosen-bucket"));
+}
+{
+  // HTTP header names are case-insensitive; the keys of a plain JS object are not. A
+  // lowercase `x-visitor-id` slipped in via `extra` would survive a naive
+  // `delete out["X-Visitor-Id"]` and reach the backend as a second, conflicting header.
+  const caller: Caller = { key: "resolved-key", role: null, actor: null };
+  const out = backendHeaders(caller, { "x-visitor-id": "sneaky-lowercase" }, null, "ours-12345");
+  const values = Object.entries(out)
+    .filter(([k]) => k.toLowerCase() === VISITOR_HEADER.toLowerCase())
+    .map(([, v]) => v);
+  check("a lowercase x-visitor-id is stripped too (headers are case-insensitive)",
+    values.length === 1 && values[0] === "ours-12345");
+}
+{
+  // "We chose nothing" must not degrade to "the caller chose". With no id of our own,
+  // the client's value must still be removed rather than left in place.
+  const caller: Caller = { key: "resolved-key", role: null, actor: null };
+  const out = backendHeaders(caller, { [VISITOR_HEADER]: "attacker-chosen-bucket" });
+  check("no visitor id resolved -> a client-supplied one is still stripped",
+    !(VISITOR_HEADER in out));
+  const anyCasing = Object.keys(out).some((k) => k.toLowerCase() === VISITOR_HEADER.toLowerCase());
+  check("  ...in any casing", anyCasing === false);
+}
+{
+  const caller: Caller = { key: "resolved-key", role: null, actor: null };
+  const out = backendHeaders(caller, {}, null, "bucket-abc");
+  check("a resolved visitor id becomes X-Visitor-Id", out[VISITOR_HEADER] === "bucket-abc");
+  check("the other headers are untouched by the visitor logic", out["X-API-Key"] === "resolved-key");
+}
+
+section("per-person mode buckets by the person, not the browser");
+{
+  staffEnv();
+  const { value } = createSession("ada", "employee");
+  const request = requestWith(value);
+  const r = resolveCaller(request);
+  check("staff session resolves", r.ok === true);
+  if (r.ok) {
+    const v = resolveVisitor(request, r.caller);
+    check("staff visitor id IS the person id (real per-person limiting)", v.id === "ada");
+    check("  ...the same value already used for actor", v.id === r.caller.actor);
+    check("staff mode sets NO cookie (the session already says who this is)", v.setCookie === null);
+    check("staff id satisfies the contract", CONTRACT.test(v.id));
+  }
+}
+{
+  // A visitor cookie left in the browser by the public site must not displace the
+  // person id on the staff deployment. Identity wins; the stray cookie is inert.
+  staffEnv();
+  const { value } = createSession("peter", "executive");
+  const request = new Request("http://internal.local/api/rag/chat", {
+    method: "POST",
+    headers: { cookie: `${VISITOR_COOKIE}=leftover-from-public-site; ${SESSION_COOKIE}=${value}` },
+  });
+  const r = resolveCaller(request);
+  check("staff session still resolves alongside a stray visitor cookie", r.ok === true);
+  if (r.ok) {
+    const v = resolveVisitor(request, r.caller);
+    check("a stray visitor cookie is IGNORED in staff mode", v.id === "peter");
+    check("  ...and is not re-issued", v.setCookie === null);
+  }
+}
+{
+  // staffConfig() constrains ids to [a-z0-9_-] but not their LENGTH, so an absurd id is
+  // reachable through config. Truncating to 64 would merge two people sharing a prefix
+  // into one bucket; hashing keeps one person to one bucket. Stability is the property
+  // that matters — the same actor must map to the same id on every request.
+  const longActor = "a".repeat(70);
+  const caller: Caller = { key: "k", role: "employee", actor: longActor };
+  const v1 = resolveVisitor(rawRequest(), caller);
+  const v2 = resolveVisitor(rawRequest(), caller);
+  check("an over-long actor id is reduced to a contract-valid id", CONTRACT.test(v1.id));
+  check("  ...deterministically (same actor -> same bucket every request)", v1.id === v2.id);
+  check("  ...and is not a truncation of the original", v1.id !== longActor.slice(0, 64));
+  const other: Caller = { key: "k", role: "employee", actor: "a".repeat(69) + "b" };
+  check("  ...two long ids sharing a 64-char prefix do NOT collide",
+    resolveVisitor(rawRequest(), other).id !== v1.id);
+  check("  ...and still no cookie is issued for a staff caller", v1.setCookie === null);
+}
+
+section("single-key mode mints an opaque bucket id and persists it");
+{
+  setEnv({ RAG_API_KEY: "guest-key" });
+  const { visitor, caller } = publicVisitor(rawRequest());
+  check("a first-time visitor gets an id", typeof visitor.id === "string" && visitor.id.length > 0);
+  check("the minted id satisfies the charset/length contract", CONTRACT.test(visitor.id));
+  check("  ...and is comfortably inside the 64-char cap", visitor.id.length <= 64);
+  check("a cookie is issued so the same browser returns to the same bucket", visitor.setCookie !== null);
+  check("the cookie carries exactly the minted id",
+    setCookieValue(visitor.setCookie ?? "", VISITOR_COOKIE) === visitor.id);
+  // Requirement 4: a random browser id is not a person, and must never be recorded as
+  // one. The public deployment's audit trail stays anonymous.
+  check("minting a visitor id does NOT populate actor", caller.actor === null);
+  const out = backendHeaders(caller, {}, null, visitor.id);
+  check("  ...and the visitor id does NOT leak into X-Actor", !(ACTOR_HEADER in out));
+  check("  ...it travels only in X-Visitor-Id", out[VISITOR_HEADER] === visitor.id);
+}
+{
+  setEnv({ RAG_API_KEY: "guest-key" });
+  // Two separate first-time visitors must land in different buckets, or the whole
+  // exercise collapses back to one shared bucket.
+  const a = publicVisitor(rawRequest()).visitor.id;
+  const b = publicVisitor(rawRequest()).visitor.id;
+  check("two first-time visitors get DIFFERENT ids", a !== b);
+}
+{
+  setEnv({ RAG_API_KEY: "guest-key" });
+  // THE REUSE PROPERTY: the browser sends the cookie back, and the same bucket is used
+  // without re-issuing it. Without this the "limit" resets on every single request.
+  const first = publicVisitor(rawRequest()).visitor;
+  const minted = first.id;
+  const second = publicVisitor(rawRequest({ cookie: `${VISITOR_COOKIE}=${minted}` })).visitor;
+  check("a returning browser reuses the SAME bucket id", second.id === minted);
+  check("  ...and no new cookie is issued", second.setCookie === null);
+  const third = publicVisitor(rawRequest({ cookie: `theme=dark; ${VISITOR_COOKIE}=${minted}; x=1` })).visitor;
+  check("  ...found among other cookies too", third.id === minted && third.setCookie === null);
+}
+
+section("the visitor cookie is HttpOnly, SameSite=Lax, and Secure on the same terms as the session");
+{
+  setEnv({ RAG_API_KEY: "guest-key" });
+  const c = publicVisitor(rawRequest()).visitor.setCookie ?? "";
+  check("HttpOnly (page JS and an XSS cannot read or rewrite the bucket)", c.includes("HttpOnly"));
+  check("SameSite=Lax (same posture as the session cookie)", c.includes("SameSite=Lax"));
+  check("Secure is on by DEFAULT (opt out, never opt in)", c.includes("Secure"));
+  check("Path=/ so every route sees the same bucket", c.includes("Path=/"));
+  check("a Max-Age is set — a session-scoped cookie would reset the bucket per tab", c.includes("Max-Age="));
+  const maxAge = Number(/Max-Age=(\d+)/.exec(c)?.[1] ?? "0");
+  check("  ...and it outlives a daily budget window by a wide margin", maxAge > 24 * 60 * 60);
+}
+{
+  // The SAME escape hatch as session.ts, not a new one: one variable governs both
+  // cookies, so a local http deployment cannot end up with one Secure and one not.
+  setEnv({ RAG_API_KEY: "guest-key", RAG_COOKIE_INSECURE: "1" });
+  check("RAG_COOKIE_INSECURE=1 drops Secure for local http",
+    !(publicVisitor(rawRequest()).visitor.setCookie ?? "").includes("Secure"));
+  setEnv({ RAG_API_KEY: "guest-key", RAG_COOKIE_INSECURE: "true" });
+  check("only the exact string '1' opts out",
+    (publicVisitor(rawRequest()).visitor.setCookie ?? "").includes("Secure"));
+}
+{
+  setEnv({ RAG_API_KEY: "guest-key" });
+  const c = publicVisitor(rawRequest()).visitor.setCookie ?? "";
+  // It is a bucket label, not a credential. If this ever starts looking like the
+  // session cookie, someone will eventually treat it as one.
+  check("the visitor cookie is NOT the session cookie", !c.startsWith(`${SESSION_COOKIE}=`));
+  check("  ...it is its own name", c.startsWith(`${VISITOR_COOKIE}=`));
+}
+
+section("the visitor cookie is re-validated on the way in — it is client input like any other");
+{
+  // HttpOnly stops PAGE SCRIPTS touching the cookie. It does not stop a scripted client
+  // sending whatever bytes it likes in a Cookie header. So a value read back out of our
+  // own cookie is untrusted, and a bad one is replaced rather than forwarded.
+  setEnv({ RAG_API_KEY: "guest-key" });
+  const bad: [string, string][] = [
+    ["too long", "a".repeat(65)],
+    ["disallowed char (slash)", "abc/def"],
+    ["disallowed char (space)", "abc def"],
+    ["disallowed char (colon)", "abc:def"],
+    ["empty", ""],
+    ["non-ascii", "abcédef"],
+  ];
+  for (const [label, value] of bad) {
+    const v = publicVisitor(rawRequest({ cookie: `${VISITOR_COOKIE}=${value}` })).visitor;
+    check(`a cookie value that is ${label} is rejected and replaced`,
+      v.id !== value && CONTRACT.test(v.id) && v.setCookie !== null);
+  }
+}
+{
+  // THE INJECTION CASE. An unvalidated cookie value flows into an outbound request
+  // header; a CR or LF in it would be header injection against the backend.
+  //
+  // There are two independent guards, and this asserts both rather than assuming
+  // either. Relying only on the platform's would mean the check quietly stops being
+  // load-bearing the day this code runs somewhere less strict.
+  setEnv({ RAG_API_KEY: "guest-key" });
+  const evil = "abc\r\nX-API-Key: stolen";
+
+  // GUARD 1 — the runtime. undici refuses to construct a Request holding a CRLF
+  // header value at all, so such a value cannot arrive through a real request.
+  let runtimeRefused = false;
+  try {
+    new Request("http://public.local/", { headers: { cookie: `${VISITOR_COOKIE}=${evil}` } });
+  } catch {
+    runtimeRefused = true;
+  }
+  check("the runtime itself refuses to build a Request with a CRLF header value", runtimeRefused);
+
+  // GUARD 2 — ours. Fed the value directly (the only way to get past guard 1), the
+  // contract still rejects it, so nothing carrying a header separator goes outbound.
+  const v = resolveVisitor(requestWithRawCookie(`${VISITOR_COOKIE}=${evil}`), PUBLIC_CALLER);
+  check("a CRLF-bearing cookie value never becomes the outbound id", v.id !== evil);
+  check("  ...the replacement contains no CR or LF", !/[\r\n]/.test(v.id));
+  check("  ...and it satisfies the contract", CONTRACT.test(v.id));
+  check("  ...and a fresh cookie replaces the poisoned one", v.setCookie !== null);
+}
+{
+  // A cookie whose NAME merely resembles ours must not be picked up — the same
+  // exact-name rule the session parser uses.
+  setEnv({ RAG_API_KEY: "guest-key" });
+  const v = publicVisitor(rawRequest({ cookie: `${VISITOR_COOKIE}_other=borrowed; x${VISITOR_COOKIE}=borrowed` })).visitor;
+  check("a near-miss cookie name is not treated as the visitor cookie", v.id !== "borrowed");
+  check("  ...so a fresh id is minted instead", v.setCookie !== null);
 }
 
 console.log(`\nRESULT: ${pass} passed, ${fail} failed`);

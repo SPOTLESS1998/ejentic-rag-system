@@ -710,21 +710,27 @@ def _clearance_for(role: str, requested: str) -> str:
         raise authmod.as_http(e)
 
 
-# One limiter for the process. Buckets are keyed by the AUTHENTICATED role, so a
-# compromised guest key cannot spend the executive tier's allowance.
-LIMITER = ratelimit.limits_from_config(CFG)
+# One limiter for the process. Two tiers: the CEILING is keyed by the
+# authenticated role (so a compromised guest key cannot spend the executive
+# tier's allowance), and nested inside it a per-VISITOR share keyed by the
+# X-Visitor-Id header, so one visitor cannot exhaust a shared key's budget.
+LIMITER = ratelimit.tiered_from_config(CFG)
 # Printed at import so `docker logs` answers "what limits is this instance
 # actually running?" without a shell into the container. A ceiling nobody can
 # see is a ceiling nobody checks.
-print(f"[ratelimit] active limits: "
-      + (", ".join(f"{w.limit}/{w.label}" for w in LIMITER.windows)
-         if LIMITER.enabled else "NONE — request count is unbounded")
-      + f" (per role; worst case {(CFG.get('max_requests_per_day') or 0) * MAX_OUTPUT_TOKENS:,}"
+print("[ratelimit] active limits: "
+      + (", ".join(f"{w.limit}/{w.label}" for w in LIMITER.ceiling.windows)
+         if LIMITER.ceiling.enabled else "NONE — request count is unbounded")
+      + " per role"
+      + (" | per visitor: "
+         + ", ".join(f"{w.limit}/{w.label}" for w in LIMITER.share.windows)
+         if LIMITER.share.enabled else " | per-visitor share DISABLED")
+      + f" (worst case {(CFG.get('max_requests_per_day') or 0) * MAX_OUTPUT_TOKENS:,}"
         f" completion tokens/day/role)")
 
 
-def _rate_limit(role: str) -> None:
-    """Charge one request against this credential's ceilings, or 429.
+def _rate_limit(role: str, visitor: str | None = None) -> None:
+    """Charge one request against this caller's ceilings, or 429.
 
     ⚠️ ORDER MATTERS, and it is the opposite of the query-length check. The
     length cap is declared on the pydantic model so it runs BEFORE auth — it
@@ -733,9 +739,14 @@ def _rate_limit(role: str) -> None:
     keying it on anything an unauthenticated caller controls would let a keyless
     attacker burn the legitimate users' allowance — a denial of service delivered
     THROUGH the rate limiter. Rejecting a bad key first costs no tokens anyway.
+
+    `visitor` is caller-supplied and therefore forgeable. It can only ever narrow
+    what this caller may do, never widen it: the ceiling is keyed by the role the
+    KEY proved, so rotating visitor ids buys fresh visitor buckets and still hits
+    the credential ceiling. See ratelimit.TieredRateLimiter.
     """
     try:
-        LIMITER.admit(role)
+        LIMITER.admit(role, visitor)
     except ratelimit.RateLimitError as e:
         raise HTTPException(status_code=e.status, detail=e.detail,
                             headers={"Retry-After": str(e.retry_after)})
@@ -1365,7 +1376,8 @@ async def chat(request: QueryRequest,
                x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
                authorization: str | None = Header(default=None),
                x_upload_token: str | None = Header(default=None),
-               x_actor: str | None = Header(default=None, alias=authmod.ACTOR_HEADER)):
+               x_actor: str | None = Header(default=None, alias=authmod.ACTOR_HEADER),
+               x_visitor_id: str | None = Header(default=None)):
     """Web UI endpoint — Server-Sent Events. Emits `data: {"chunk": "..."}\\n\\n`
     per token and a terminating `data: [DONE]\\n\\n`.
 
@@ -1375,7 +1387,7 @@ async def chat(request: QueryRequest,
     if global_index is None:
         raise HTTPException(status_code=500, detail="Agent not initialized.")
     role = _authed_role(x_api_key, authorization)
-    _rate_limit(role)
+    _rate_limit(role, x_visitor_id)
     clearance = _clearance_for(role, request.clearance_level)
     # WHO, for the audit trail only. Resolved AFTER the key decided the clearance
     # above, so it cannot influence it.
@@ -1410,7 +1422,8 @@ async def n8n_rag_endpoint(request: QueryRequest,
                            x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
                            authorization: str | None = Header(default=None),
                            x_upload_token: str | None = Header(default=None),
-                           x_actor: str | None = Header(default=None, alias=authmod.ACTOR_HEADER)):
+                           x_actor: str | None = Header(default=None, alias=authmod.ACTOR_HEADER),
+                           x_visitor_id: str | None = Header(default=None)):
     """n8n orchestration endpoint — strict JSON in, strict JSON out.
     Returns `{"status": "success", "response": "..."}`.
 
@@ -1419,7 +1432,7 @@ async def n8n_rag_endpoint(request: QueryRequest,
     if global_index is None:
         raise HTTPException(status_code=500, detail="Agent not initialized.")
     role = _authed_role(x_api_key, authorization)
-    _rate_limit(role)
+    _rate_limit(role, x_visitor_id)
     clearance = _clearance_for(role, request.clearance_level)
     # WHO, for the audit trail only — resolved after the key decided clearance.
     actor = authmod.clean_actor(x_actor)
@@ -1634,7 +1647,8 @@ def _safe_upload_path(upload_dir: str, original_name: str) -> str:
 @app.post("/upload")
 async def upload_pdf(file: UploadFile = File(...),
                      x_api_key: str | None = Header(default=None, alias=authmod.API_KEY_HEADER),
-                     authorization: str | None = Header(default=None)):
+                     authorization: str | None = Header(default=None),
+                     x_visitor_id: str | None = Header(default=None)):
     """Ingest a one-off document into an in-memory index PRIVATE to the caller.
 
     Returns an `upload_token`; send it back as the `X-Upload-Token` header on
@@ -1643,7 +1657,7 @@ async def upload_pdf(file: UploadFile = File(...),
     is precisely why it is token-scoped rather than global: the old code kept ONE
     process-wide index and mixed it into every caller's queries.
     """
-    _rate_limit(_authed_role(x_api_key, authorization))
+    _rate_limit(_authed_role(x_api_key, authorization), x_visitor_id)
 
     upload_dir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "uploads")
     os.makedirs(upload_dir, exist_ok=True)

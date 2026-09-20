@@ -57,6 +57,7 @@ TWO RULES THAT ARE EASY TO GET WRONG
 from __future__ import annotations
 
 import os
+import re
 import time
 from collections import deque
 from typing import Optional
@@ -103,17 +104,50 @@ class _Window:
     exactly the condition for refusing.
     """
 
-    def __init__(self, limit: int, seconds: float, label: str):
+    def __init__(self, limit: int, seconds: float, label: str,
+                 fail_open: bool = False):
         self.limit = int(limit)
         self.seconds = float(seconds)
         self.label = label
+        # What to do when MAX_BUCKETS is reached and this bucket is untracked.
+        # The CEILING tier fails closed (it is the cost guarantee). The per-visitor
+        # SHARE tier fails OPEN — see TieredRateLimiter for why that asymmetry is
+        # correct rather than sloppy.
+        self.fail_open = fail_open
+        self._capped_logged = False
         self._log: dict[str, deque] = {}
+
+    def _sweep(self, now: float) -> None:
+        """Drop buckets that are entirely outside the window.
+
+        Needed because the SHARE tier is keyed by visitor, and visitors are
+        unbounded over time while the ceiling tier's roles are not. Without this,
+        `_log` grows with every visitor ever seen rather than with visitors
+        currently inside the window — and since the share tier fails OPEN at the
+        cap, that means the per-visitor limit would silently stop working for
+        good once enough distinct visitors had been served. (Found by the test
+        that asserts this, not by reading the code.)
+
+        Checking `dq[-1]` is the whole trick: a bucket is stale when its NEWEST
+        entry has aged out, and that is O(1). An earlier version only removed
+        buckets that were already empty, which never fired — a stale bucket is
+        not empty, it is full of timestamps nobody has looked at yet.
+
+        Runs only when the table is getting large, so the common path stays O(1).
+        """
+        if len(self._log) <= MAX_BUCKETS // 2:
+            return
+        cutoff = now - self.seconds
+        stale = [k for k, dq in self._log.items() if not dq or dq[-1] <= cutoff]
+        for key in stale:
+            del self._log[key]
 
     def _prune(self, bucket: str, now: float) -> Optional[deque]:
         """Drop timestamps that have aged out. Returns the live log, or None if
         this bucket does not exist and cannot be created."""
         dq = self._log.get(bucket)
         if dq is None:
+            self._sweep(now)
             if len(self._log) >= MAX_BUCKETS:
                 return None
             dq = self._log[bucket] = deque()
@@ -128,12 +162,17 @@ class _Window:
         docstring."""
         dq = self._prune(bucket, now)
         if dq is None:
-            # Bucket cap reached. Fail closed, loudly: this is a misconfiguration
-            # or an attack, and either way silence is the wrong response.
-            print(f"[ratelimit] REFUSING: bucket cap ({MAX_BUCKETS}) reached on "
-                  f"{self.label}; '{bucket}' not tracked. Are limiter keys "
-                  f"caller-controlled? See MAX_BUCKETS.")
-            return self.seconds
+            # Bucket table is full and this bucket is not in it. Log ONCE, not per
+            # request: at this point every request takes this path, and a line per
+            # request would bury the incident in its own noise.
+            if not self._capped_logged:
+                self._capped_logged = True
+                print(f"[ratelimit] bucket cap ({MAX_BUCKETS}) reached on "
+                      f"{self.label}; '{bucket}' untracked — "
+                      + ("ALLOWING (share tier; the per-credential ceiling still "
+                         "applies)" if self.fail_open else
+                         "REFUSING (ceiling tier, fail-closed)"))
+            return None if self.fail_open else self.seconds
         if self.limit <= 0:
             # A limit of zero means "closed", not "unlimited". An operator who
             # types 0 gets a closed door; unlimited is expressed by omitting the
@@ -165,16 +204,50 @@ class RateLimiter:
     one — this is the reason `admit` is a plain `def` and not `async def`.
     """
 
-    def __init__(self, per_minute: Optional[int], per_day: Optional[int]):
+    def __init__(self, per_minute: Optional[int], per_day: Optional[int],
+                 fail_open: bool = False, tier: str = "credential"):
+        self.tier = tier
         self.windows = []
         if per_minute is not None:
-            self.windows.append(_Window(per_minute, 60.0, "per-minute"))
+            self.windows.append(_Window(per_minute, 60.0, "per-minute", fail_open))
         if per_day is not None:
-            self.windows.append(_Window(per_day, 86_400.0, "per-day"))
+            self.windows.append(_Window(per_day, 86_400.0, "per-day", fail_open))
 
     @property
     def enabled(self) -> bool:
         return bool(self.windows)
+
+    def worst_refusal(self, bucket: str, now: float) -> Optional[tuple]:
+        """The tightest window refusing this request, as (wait_seconds, window),
+        or None if every window has room. RECORDS NOTHING.
+
+        Split out from `admit` so a caller holding SEVERAL limiters can check all
+        of them before recording in any — the same rule-2 atomicity that applies
+        between windows applies between tiers. See TieredRateLimiter.
+        """
+        worst: Optional[tuple] = None
+        for w in self.windows:
+            wait = w.would_refuse(bucket, now)
+            if wait is not None and (worst is None or wait > worst[0]):
+                worst = (wait, w)
+        return worst
+
+    def record(self, bucket: str, now: float) -> None:
+        for w in self.windows:
+            w.record(bucket, now)
+
+    def _refuse(self, worst: tuple) -> "RateLimitError":
+        wait, w = worst
+        retry_after = max(1, int(wait) + (1 if wait % 1 else 0))
+        scope = ("this credential" if self.tier == "credential"
+                 else "one visitor")
+        return RateLimitError(
+            f"rate limit exceeded: at most {w.limit} requests per "
+            f"{'minute' if w.seconds <= 60 else '24h'} for {scope}. "
+            f"Retry in {retry_after}s.",
+            retry_after=retry_after,
+            window=f"{self.tier}:{w.label}",
+        )
 
     def admit(self, bucket: str, now: Optional[float] = None) -> None:
         """Admit one request for `bucket`, or raise RateLimitError.
@@ -189,25 +262,10 @@ class RateLimiter:
         # Check every window BEFORE recording in any of them (rule 2). The
         # tightest refusal wins, so the Retry-After we hand back is the one that
         # is actually true.
-        worst: Optional[tuple] = None
-        for w in self.windows:
-            wait = w.would_refuse(bucket, now)
-            if wait is not None and (worst is None or wait > worst[0]):
-                worst = (wait, w)
-
+        worst = self.worst_refusal(bucket, now)
         if worst is not None:
-            wait, w = worst
-            retry_after = max(1, int(wait) + (1 if wait % 1 else 0))
-            raise RateLimitError(
-                f"rate limit exceeded: at most {w.limit} requests per "
-                f"{'minute' if w.seconds <= 60 else '24h'} for this credential. "
-                f"Retry in {retry_after}s.",
-                retry_after=retry_after,
-                window=w.label,
-            )
-
-        for w in self.windows:
-            w.record(bucket, now)
+            raise self._refuse(worst)
+        self.record(bucket, now)
 
     def snapshot(self, bucket: str, now: Optional[float] = None) -> dict:
         """Current usage per window. For diagnostics and tests, never for a
@@ -216,6 +274,136 @@ class RateLimiter:
             now = time.monotonic()
         return {w.label: {"used": w.used(bucket, now), "limit": w.limit}
                 for w in self.windows}
+
+
+VISITOR_ID_MAX = 64
+_VISITOR_OK = re.compile(r"[A-Za-z0-9._-]+")
+
+
+def clean_visitor_id(value: Optional[str]) -> Optional[str]:
+    """Sanitise a caller-supplied visitor id before it becomes a dict key.
+
+    Returns None for anything absent or implausible, which degrades that request
+    to ceiling-only limiting rather than refusing it.
+
+    This value arrives in a header, so it is caller-controlled and lands in an
+    in-memory table — exactly the shape that turns a limiter into the
+    unbounded-memory bug it was written to prevent. So: fixed charset, hard
+    length cap, and no normalisation games. It is compared only for equality, so
+    there is nothing to be clever about.
+    """
+    if not value:
+        return None
+    v = value.strip()
+    if not v or len(v) > VISITOR_ID_MAX:
+        return None
+    if not _VISITOR_OK.fullmatch(v):
+        return None
+    return v
+
+
+class TieredRateLimiter:
+    """A per-credential CEILING with a per-visitor SHARE nested inside it.
+
+    WHY TWO TIERS
+    -------------
+    Buckets keyed by API key alone are the wrong shape for a public site. The
+    public UI holds ONE shared guest key, so every visitor lands in one bucket
+    and `max_requests_per_day` becomes the whole site's daily budget rather than
+    one visitor's. Roughly fifty visitors asking ten questions each exhausts it,
+    and every visitor after that sees a 429 that reads as an outage.
+
+    So: the ceiling (keyed by the authenticated role) still bounds total spend,
+    and inside it a share (keyed by visitor) stops any single visitor taking a
+    disproportionate slice. BOTH must admit. Neither replaces the other.
+
+    🧠 THE POINT OF THE NESTING — AND WHY A FORGEABLE ID IS STILL USEFUL.
+    The visitor id comes from a header, so anyone holding the API key can forge
+    or rotate it. That would be fatal if the visitor bucket were the only limit:
+    rotate the id, get a fresh allowance. It is fine here because the ceiling is
+    keyed by the API KEY, which the caller cannot forge — rotating visitor ids
+    buys unlimited *visitor* buckets and still runs into the *credential*
+    ceiling. The unforgeable identity enforces the ceiling; the forgeable one
+    only refines fairness beneath it. Read in that order, the design is sound;
+    read the other way round it looks broken.
+
+    THE FAILURE ASYMMETRY, WHICH IS DELIBERATE
+    ------------------------------------------
+    At MAX_BUCKETS the two tiers behave oppositely:
+
+      * the CEILING fails CLOSED — it is the cost guarantee, and an untracked
+        bucket there means we cannot bound spend, so we refuse;
+      * the SHARE fails OPEN — it degrades to ceiling-only limiting.
+
+    Failing the share closed would refuse legitimate visitors once enough
+    distinct visitors were seen, which is a self-inflicted outage. Failing it
+    open costs only fairness, never the cost bound, *because the ceiling is
+    still there*. This is the same reasoning that makes a forgeable id
+    acceptable: everything the share tier can lose is recoverable; nothing the
+    ceiling protects is.
+    """
+
+    def __init__(self, ceiling: RateLimiter, share: RateLimiter):
+        self.ceiling = ceiling
+        self.share = share
+
+    @property
+    def enabled(self) -> bool:
+        return self.ceiling.enabled or self.share.enabled
+
+    @property
+    def windows(self):
+        """Every active window, for the boot banner and diagnostics."""
+        return list(self.ceiling.windows) + list(self.share.windows)
+
+    def admit(self, role: str, visitor: Optional[str] = None,
+              now: Optional[float] = None) -> None:
+        """Charge one request against both tiers, or raise RateLimitError.
+
+        `visitor` may be None (no id presented, or it failed sanitisation), in
+        which case only the ceiling applies. That is the honest fallback: we
+        cannot fairly share what we cannot distinguish, and refusing would punish
+        a caller for our own missing metadata.
+        """
+        if now is None:
+            now = time.monotonic()
+
+        vid = clean_visitor_id(visitor)
+        # Namespaced by role so a visitor id can never collide across roles — and
+        # so a guest cannot consume an executive visitor bucket by presenting the
+        # same id. \x00 cannot appear in a sanitised id, so the join is unambiguous.
+        share_bucket = f"{role}\x00{vid}" if vid else None
+
+        # BOTH tiers are checked before EITHER records — the same atomicity rule
+        # that holds between windows holds between tiers. Charging the ceiling for
+        # a request the share tier then refuses would spend budget on a request
+        # that never ran.
+        worst_ceiling = self.ceiling.worst_refusal(role, now)
+        worst_share = (self.share.worst_refusal(share_bucket, now)
+                       if share_bucket and self.share.enabled else None)
+
+        # The ceiling's refusal is reported in preference to the share's: it is
+        # the more serious condition (everyone on this credential is affected,
+        # not just this visitor) and its Retry-After is the one that matters.
+        if worst_ceiling is not None:
+            raise self.ceiling._refuse(worst_ceiling)
+        if worst_share is not None:
+            raise self.share._refuse(worst_share)
+
+        self.ceiling.record(role, now)
+        if share_bucket and self.share.enabled:
+            self.share.record(share_bucket, now)
+
+    def snapshot(self, role: str, visitor: Optional[str] = None,
+                 now: Optional[float] = None) -> dict:
+        """Usage in both tiers. Diagnostics only — must not change anything."""
+        if now is None:
+            now = time.monotonic()
+        out = {"credential": self.ceiling.snapshot(role, now)}
+        vid = clean_visitor_id(visitor)
+        if vid and self.share.enabled:
+            out["visitor"] = self.share.snapshot(f"{role}\x00{vid}", now)
+        return out
 
 
 def _window_limit(value, key: str, env_name: str) -> Optional[int]:
@@ -295,4 +483,38 @@ def limits_from_config(cfg: dict) -> RateLimiter:
         per_day=_window_limit(cfg.get("max_requests_per_day"),
                               "max_requests_per_day",
                               "MAX_REQUESTS_PER_DAY"),
+        tier="credential",
     )
+
+
+def visitor_limits_from_config(cfg: dict) -> RateLimiter:
+    """The per-visitor SHARE tier, nested inside the credential ceiling.
+
+    Sized for one human, not for the site: a person asking more than ~10
+    questions a minute is not reading the answers. Its job is not to bound spend
+    — the ceiling does that — but to stop one visitor consuming a
+    disproportionate slice of a shared key's allowance.
+
+    FAIL-OPEN at the bucket cap, deliberately. See TieredRateLimiter for why the
+    two tiers fail in opposite directions.
+
+    Env overrides: MAX_REQUESTS_PER_VISITOR_PER_MINUTE / ..._PER_DAY.
+    `null` in config (or `off` in env) disables the tier, which returns the
+    system to ceiling-only behaviour.
+    """
+    return RateLimiter(
+        per_minute=_window_limit(cfg.get("max_requests_per_visitor_per_minute"),
+                                 "max_requests_per_visitor_per_minute",
+                                 "MAX_REQUESTS_PER_VISITOR_PER_MINUTE"),
+        per_day=_window_limit(cfg.get("max_requests_per_visitor_per_day"),
+                              "max_requests_per_visitor_per_day",
+                              "MAX_REQUESTS_PER_VISITOR_PER_DAY"),
+        fail_open=True,
+        tier="visitor",
+    )
+
+
+def tiered_from_config(cfg: dict) -> TieredRateLimiter:
+    """The limiter the app actually uses: ceiling + nested per-visitor share."""
+    return TieredRateLimiter(ceiling=limits_from_config(cfg),
+                             share=visitor_limits_from_config(cfg))
