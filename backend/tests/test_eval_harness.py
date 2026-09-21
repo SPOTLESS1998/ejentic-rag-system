@@ -215,4 +215,64 @@ check("report flags a floating-alias judge as non-reproducible",
 check("JUDGE_MODEL defaults to the system LLM (no behaviour change unless pinned)",
       eval_rag.JUDGE_MODEL == main.LLM_MODEL)
 
+# ---------------------------------------------------------------------------
+section("5. an unwritable report must not be reported as a FAILED eval")
+# ---------------------------------------------------------------------------
+# FOUND IN PRODUCTION 2026-09-21. The report write was unguarded and was the last
+# statement before the return, so a run that scored 23/23 with ZERO leaks and
+# printed "exit=0" died with PermissionError and the process exited 1 — which in
+# this ladder means "FAIL — below min-pass". Automation reading that code would
+# have concluded the clearance boundary failed its security eval.
+#
+# 🧠 An evaluation tool has to be as careful about WHICH failure it reports as
+# about whether one occurred. A wrong failure reason sends you to debug the wrong
+# system, so it is not a smaller bug than a missed failure.
+import os as _os  # noqa: E402
+
+_clean = [{"id": "c1", "dimension": "correctness", "role": "guest",
+           "question": "q", "expect": "answer", "actual": "answer",
+           "passed": True, "errored": False, "leaked": False, "behavior_ok": True,
+           "correctness": "PASS", "reason": "", "gated": False, "saved": 0,
+           "system_tokens": 10, "token_source": "provider", "text": "hello"}]
+
+
+def _report_to(path):
+    return eval_rag.report(_clean, main.TokenMeter(), path, 1.0, True, 0, 0, 0, 0)
+
+
+_ok_path = _os.path.join(tempfile.gettempdir(), "eval_report_test.json")
+if _os.path.exists(_ok_path):
+    _os.remove(_ok_path)
+_code = _report_to(_ok_path)
+check("a clean run that CAN write its report exits 0", _code == 0, f"exit={_code}")
+check("...and the report really is on disk (control for the test below)",
+      _os.path.exists(_ok_path))
+
+# An unwritable destination: a path inside a file, which cannot be a directory.
+_bad = _os.path.join(_ok_path, "nope", "eval_report.json")
+_code = _report_to(_bad)
+check("a clean run whose report CANNOT be written does NOT exit 0",
+      _code != 0, f"exit={_code}")
+check("...and does NOT exit 1 — that would read as 'the answers were wrong'",
+      _code != 1, f"exit={_code}")
+check("...and does NOT exit 2 — that would read as a CLEARANCE LEAK",
+      _code != 2, f"exit={_code}")
+check("it exits 5, the distinct 'graded clean, not recorded' code",
+      _code == 5, f"exit={_code}")
+
+# A genuine grading failure keeps its own code even when the write also fails:
+# the grading verdict is the more serious condition and must not be masked.
+_leaky = [dict(_clean[0], leaked=True, passed=False)]
+_code = eval_rag.report(_leaky, main.TokenMeter(), _bad, 1.0, True, 0, 0, 0, 0)
+check("a CLEARANCE LEAK still exits 2 even when the report cannot be written",
+      _code == 2, f"exit={_code} — a storage failure must never mask a leak")
+
+_fail = [dict(_clean[0], passed=False, correctness="FAIL")]
+_code = eval_rag.report(_fail, main.TokenMeter(), _bad, 1.0, True, 0, 0, 0, 0)
+check("a below-min-pass run still exits 1 when the report cannot be written",
+      _code == 1, f"exit={_code}")
+
+if _os.path.exists(_ok_path):
+    _os.remove(_ok_path)
+
 finish("test_eval_harness")

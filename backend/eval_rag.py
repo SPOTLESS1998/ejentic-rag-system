@@ -33,6 +33,17 @@ the system misbehaving. Errored cases never pass and never read as secure.
 
 Exit codes:  0 = all good   1 = below --min-pass   2 = a clearance leak (loudest)
              3 = AI core offline   4 = incomplete (infra errors left cases unverified)
+             5 = graded clean but the report could NOT be written (no stored
+                 evidence). Deliberately NOT 1: a storage failure must never be
+                 readable as "the answers were wrong" — see report().
+
+⚠️ Gemini free tier meters requests PER MINUTE, PER PROJECT, PER MODEL — measured
+at 15/min for gemini-flash-lite (2026-09-21), not a daily budget. With the judge
+on, each case costs TWO calls, so --delay must be at least 60/15 x 2 ... in
+practice --delay 4.5 runs clean while the default 2.0 trips 429s that the retry
+logic then has to absorb. If you need more throughput than that, a key in a
+SEPARATE Google Cloud project gets its own per-minute allowance; a second model
+does too, since the quota is per model as well.
 """
 import argparse
 import asyncio
@@ -471,9 +482,37 @@ def report(results, judge_meter, out_path, min_pass, use_judge,
             for r in results
         ],
     }
-    with open(out_path, "w", encoding="utf-8") as fh:
-        json.dump(payload, fh, indent=2, ensure_ascii=False)
-    print(f"  wrote {out_path}\n")
+    # WRITING THE REPORT MUST NOT BE ABLE TO CHANGE THE VERDICT.
+    #
+    # This was unguarded, and it is the last statement before the return — so on
+    # 2026-09-21 a run that scored 23/23 with zero leaks and printed "exit=0"
+    # died here with PermissionError and the PROCESS exited 1. Exit 1 means
+    # "FAIL — below min-pass" in the ladder above: any automation reading it
+    # would have concluded the clearance boundary had failed its security eval,
+    # when in fact it passed clean and only a file could not be written. (The
+    # production container runs as non-root and /app is root-owned; only
+    # /app/data is writable. Pass --out /app/data/eval_report.json there.)
+    #
+    # 🧠 Same lesson as the fail-open judge parser: an evaluation tool has to be
+    # as careful about WHICH failure it reports as about whether one occurred.
+    # A wrong failure reason is not a smaller bug than a missed failure — it
+    # sends you to debug the wrong system.
+    try:
+        with open(out_path, "w", encoding="utf-8") as fh:
+            json.dump(payload, fh, indent=2, ensure_ascii=False)
+        print(f"  wrote {out_path}\n")
+    except OSError as exc:
+        print(f"\n  ⚠️  COULD NOT WRITE {out_path}: {exc}")
+        print("      The grading above is valid — this is a storage failure, not")
+        print("      a test failure. But there is now NO stored evidence of this")
+        print("      run, so it cannot be cited later. Re-run with --out pointing")
+        print("      somewhere writable (in the container: /app/data/).\n")
+        # A real grading failure is the more serious condition and keeps its own
+        # code. Only a CLEAN run is remapped, so "passed but unrecorded" can
+        # never be mistaken for either a pass or a failed assertion.
+        if exit_code == 0:
+            print("  result:       PASS (UNRECORDED)   exit=5")
+            return 5
     return exit_code
 
 
