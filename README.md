@@ -354,3 +354,7 @@ tests), or a silent cross-tenant request (step 3, 409).
 
 See backend/RUNBOOK.md for the ingestion & verification onboarding process,
 and sdk/README.md for consuming the RAG from TypeScript services.
+
+---
+
+Built by [Ejentic AI](https://ejentic.xyz) — AI agents and automation for businesses. Abuja, Nigeria.
