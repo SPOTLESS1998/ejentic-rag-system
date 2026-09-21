@@ -56,6 +56,26 @@ services:
     build:
       context: ./backend
       dockerfile: Dockerfile.prod
+      args:
+        # CPU-ONLY TORCH. This box has no GPU (`torch.cuda.is_available()` is
+        # False), but the default wheels drag in the whole CUDA stack — roughly
+        # 6 GB of libraries that can never execute here. That is not merely
+        # wasteful: 27 GB in use + 10 GB new image + 10 GB build cache = 47 GB on
+        # a 45 GB disk, so the disk hit 100% on three separate deploys and twice
+        # took out the build. The box also serves client-facing
+        # audit.ejentic.xyz, so this was a blast-radius problem, not just slow.
+        #
+        # Declared HERE rather than passed as --build-arg so it cannot be
+        # forgotten on the next build, which would silently reintroduce the
+        # 10 GB image and the disk failure with it.
+        #
+        # ⚠️ VERIFY AFTER CHANGING THIS. If torch resolves broken, the pipeline
+        # falls back to the dependency-free BM25 reranker SILENTLY — answers keep
+        # coming, slightly worse, and nothing errors. Check the health endpoint
+        # reports `"reranker": "SentenceTransformerRerank"` (NOT a BM25 name) and
+        # that the logs carry "[rerank] Local sentence-transformers cross-encoder
+        # active". See backend/Dockerfile.prod.
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
     # All of the tenant's secrets and tuning. Absolute path: the secret file lives
     # OUTSIDE the git checkout, so a `git clean` or a fresh clone cannot destroy it
     # and a stray `git add -A` cannot commit it.

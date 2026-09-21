@@ -46,6 +46,12 @@ ENV PATH="/opt/venv/bin:$PATH"
 # "[rerank] Local sentence-transformers cross-encoder active" afterwards — if torch
 # came out broken, the pipeline degrades to the dependency-free reranker silently
 # rather than failing, which is exactly how this would go unnoticed.
+#
+# 🔴 TURNED ON FOR THIS DEPLOYMENT (2026-09-21) in docker-compose.prod.yml, after
+# the disk hit 100% on three separate deploys. The server has no GPU, so the CUDA
+# stack in the default wheels is ~6 GB that can never execute. The arg default
+# stays empty so anyone building elsewhere gets the original behaviour; the
+# decision lives in the compose file, where it cannot be forgotten on a rebuild.
 ARG TORCH_INDEX_URL=""
 RUN pip install --no-cache-dir --upgrade pip \
  && if [ -n "$TORCH_INDEX_URL" ]; then \
