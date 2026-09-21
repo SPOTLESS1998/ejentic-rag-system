@@ -52,7 +52,7 @@ def check(name, cond, extra=""):
     return ok
 
 
-def post(path, body, key=None, timeout=180):
+def post(path, body, key=None, timeout=180, visitor=None):
     """Returns (status, body, headers).
 
     ⚠️ headers is the raw email.Message, NOT dict(...). HTTP header names are
@@ -62,10 +62,13 @@ def post(path, body, key=None, timeout=180):
     2026-09-20 while the server was sending it correctly. A check that cries
     wolf is worse than no check — you learn to ignore its output.
     """
-    req = urllib.request.Request(
-        BASE + path, data=json.dumps(body).encode(),
-        headers={"Content-Type": "application/json",
-                 **({"X-API-Key": key} if key else {})})
+    hdrs = {"Content-Type": "application/json"}
+    if key:
+        hdrs["X-API-Key"] = key
+    if visitor:
+        hdrs["X-Visitor-Id"] = visitor
+    req = urllib.request.Request(BASE + path, data=json.dumps(body).encode(),
+                                 headers=hdrs)
     try:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return r.status, r.read().decode(), r.headers
@@ -141,6 +144,49 @@ check("it did NOT fire on the first request (limit is not absurdly low)",
 print("\n[7] per-role buckets — exhausting executive must NOT affect guest")
 s, b, _ = post("/api/rag", {"query": "hello"}, GUEST, timeout=60)
 check("guest still served after executive is rate-limited", s == 200, f"status={s}")
+
+print("\n[8] NEW — the per-VISITOR share nested inside the guest ceiling")
+# Greetings again: zero tokens, but still charged to the limiter.
+#
+# ⚠️ WHAT THIS DOES AND DOES NOT PROVE. It proves the BACKEND honours
+# X-Visitor-Id, because this script sends the header itself. It does NOT prove
+# the frontend proxy sends one — and that is the realistic silent failure, since
+# clean_visitor_id() returns None for a missing or malformed id and quietly
+# degrades to ceiling-only rather than erroring. The proxy half is checked
+# separately, from the host, by confirming /api/rag/chat sets a rag_visitor
+# cookie. Absence of errors is not evidence here.
+a_codes, a_retry = [], None
+for i in range(40):
+    s, b, hdrs = post("/api/rag", {"query": "hello"}, GUEST, timeout=60,
+                      visitor="probe-alice")
+    a_codes.append(s)
+    if s == 429:
+        a_retry = (hdrs.get("Retry-After"), b)
+        break
+check("visitor A is eventually limited", 429 in a_codes,
+      f"after {len(a_codes)} requests; codes={sorted(set(a_codes))}")
+check("A's limit bit BEFORE the credential ceiling would have "
+      "(so it really is the tighter, per-visitor one)",
+      len(a_codes) <= 30, f"took {len(a_codes)} requests")
+if a_retry:
+    check("...and it is the VISITOR tier that refused, not the ceiling",
+          "visitor" in a_retry[1].lower(), f"body={a_retry[1][:140]}")
+    check("the visitor 429 still carries Retry-After",
+          (a_retry[0] or "").isdigit(), f"Retry-After={a_retry[0]!r}")
+
+# The assertion the whole tier exists for: a DIFFERENT visitor on the SAME
+# shared key is unaffected. Before this change, one heavy visitor took the
+# entire public site's allowance with it.
+s, b, _ = post("/api/rag", {"query": "hello"}, GUEST, timeout=60,
+               visitor="probe-bob")
+check("a DIFFERENT visitor on the same key is still served",
+      s == 200, f"status={s} — if this is 429, the visitor tier is not working")
+
+# A caller presenting NO id must not be caught by alice's exhausted bucket
+# either; it falls back to ceiling-only.
+s, b, _ = post("/api/rag", {"query": "hello"}, GUEST, timeout=60)
+check("a caller with NO visitor id is not caught by alice's bucket",
+      s == 200, f"status={s}")
 
 print(f"\n{'=' * 62}\n  LIVE VERIFY: {PASS} passed, {FAIL} failed\n{'=' * 62}")
 raise SystemExit(1 if FAIL else 0)
