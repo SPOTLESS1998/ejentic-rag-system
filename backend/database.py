@@ -75,6 +75,21 @@ class AuditLog(Base):
     query_text = Column(Text)
     response_snippet = Column(Text)
 
+    # WHICH CHUNKS produced this answer — compact JSON, one entry per retrieved
+    # source: position, node id, human ref, clearance tag and rerank score.
+    #
+    # Without it a bad answer cannot be reconstructed. You could see the question
+    # and the answer but not what the model was reading, so "why did it say that?"
+    # was unanswerable after the fact — and re-running the query is not the same
+    # experiment, because the index, the config and the model all move.
+    #
+    # 🔒 POINTERS, NOT PAYLOAD. Deliberately stores ids and refs, never the chunk
+    # TEXT. The text is already retrievable from the vector store by id, and
+    # copying restricted passages into the audit DB would spread clearance-
+    # controlled content into a second store with different access rules — the
+    # audit trail would become a way to read what the filter exists to withhold.
+    sources = Column(Text, nullable=True)
+
     # --- Token accounting (a measurable architecture) -----------------------
     # Nullable so historical rows and error rows stay valid. `gated` = 1 means
     # the confidence gate short-circuited synthesis (≈0 answer tokens spent);
@@ -100,6 +115,7 @@ _TOKEN_COLUMNS = {
     "gated": "INTEGER DEFAULT 0",
     "client": "VARCHAR(64)",
     "actor": "VARCHAR(64)",
+    "sources": "TEXT",
 }
 
 
@@ -150,6 +166,7 @@ async def log_query(
     gated: bool = False,
     client: str = None,
     actor: str = None,
+    sources: str = None,
 ):
     # Audit logging is a side-effect, never the point of the request. It runs as
     # a fire-and-forget task, so if it ever fails (e.g. a schema drift on an old
@@ -168,6 +185,10 @@ async def log_query(
                 actor=(actor or None) and str(actor)[:64],
                 query_text=query,
                 response_snippet=response[:1000],  # store up to 1000 chars of response
+                # Capped for the same reason as the response: this is a diagnostic
+                # column, not a data store, and an unbounded write from a retrieval
+                # that returned more than expected should not be able to bloat rows.
+                sources=(sources or None) and str(sources)[:4000],
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
                 total_tokens=total_tokens,
@@ -245,6 +266,12 @@ async def get_token_metrics(limit: int = 20, client: str = None):
                 "total_tokens": r.total_tokens,
                 "estimated_saved_tokens": r.estimated_saved_tokens,
                 "token_source": r.token_source,
+                # WHICH chunks fed this answer. Surfaced because a column only
+                # ever written is a column nobody reads — the whole point is
+                # being able to ask "why did it say that?" without a shell on
+                # the box and a SQL client. Ids and refs only, never chunk text
+                # (see the `sources` column definition).
+                "sources": r.sources,
             }
             for r in rows
         ]

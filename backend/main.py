@@ -1006,6 +1006,42 @@ def _build_grounded_messages(question: str, nodes) -> list:
     ]
 
 
+def _source_trace(nodes) -> str:
+    """WHICH chunks fed this answer, as compact JSON for the audit trail.
+
+    Answers the question the audit trail could not previously answer: "why did it
+    say that?". Query and answer were recorded; what the model was READING was
+    not, so a wrong answer could not be reconstructed — and re-running the query
+    is a different experiment, because the index, the config and the model all
+    move underneath you.
+
+    🔒 POINTERS, NOT PAYLOAD. Ids, refs, clearance tags and scores — never the
+    chunk text. The text is retrievable from the vector store by id, whereas
+    copying restricted passages in here would spread clearance-controlled content
+    into a second store with different access rules, turning the audit trail into
+    a way to read what the filter exists to withhold.
+
+    Never raises: this feeds a fire-and-forget audit write, and a malformed node
+    must not be able to fail a query that already succeeded.
+    """
+    out = []
+    for i, nws in enumerate(nodes or [], start=1):
+        try:
+            node = getattr(nws, "node", None)
+            md = (getattr(node, "metadata", None) or {})
+            score = getattr(nws, "score", None)
+            out.append({
+                "n": i,
+                "id": getattr(node, "node_id", None) or getattr(node, "id_", None),
+                "ref": md.get("file_name") or md.get("source") or md.get("title"),
+                "clearance": md.get("clearance"),
+                "score": round(float(score), 4) if score is not None else None,
+            })
+        except Exception:  # noqa: BLE001 - diagnostics must never break a query
+            out.append({"n": i, "id": None, "ref": "(unreadable node)"})
+    return json.dumps(out, ensure_ascii=False) if out else ""
+
+
 def _messages_text(messages) -> str:
     """Flatten a ChatMessage list to plain text (for token estimation)."""
     return "\n".join(str(getattr(m, "content", "") or "") for m in messages)
@@ -1162,6 +1198,12 @@ async def answer_once(query: str, clearance_level: str, platform: str,
             client=ACTIVE_CLIENT, actor=actor,
         ))
         return GREETING_REPLY, meter, False, 0
+    # Bound BEFORE the try so the error path below can still report what was
+    # retrieved. An exception AFTER retrieval — a failed synthesis on a
+    # particular set of chunks — is exactly when the trace is most useful, and
+    # referencing an unbound `nodes` in the handler would turn a logged error
+    # into a NameError inside the error handler.
+    nodes = []
     try:
         nodes, max_score, _ = await retrieve_and_rerank(
             query, clearance_level, meter=meter, upload_token=upload_token)
@@ -1172,7 +1214,7 @@ async def answer_once(query: str, clearance_level: str, platform: str,
                 prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
                 total_tokens=meter.total_tokens, estimated_saved_tokens=saved,
                 token_source=meter.source if meter.total_tokens else "gate", gated=True,
-                client=ACTIVE_CLIENT, actor=actor,
+                client=ACTIVE_CLIENT, actor=actor, sources=_source_trace(nodes),
             ))
             return ESCALATION_LINE, meter, True, saved
 
@@ -1186,12 +1228,13 @@ async def answer_once(query: str, clearance_level: str, platform: str,
             f"{platform}_{clearance_level}", query, text,
             prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
             total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
-            client=ACTIVE_CLIENT, actor=actor,
+            client=ACTIVE_CLIENT, actor=actor, sources=_source_trace(nodes),
         ))
         return text, meter, False, 0
     except Exception as e:
         asyncio.create_task(log_query(f"{platform}_{clearance_level}", query,
-                                      f"ERROR: {e}", client=ACTIVE_CLIENT, actor=actor))
+                                      f"ERROR: {e}", client=ACTIVE_CLIENT, actor=actor,
+                                      sources=_source_trace(nodes)))
         return f"I encountered a cognitive error while processing that request: {e}", meter, False, 0
 
 
@@ -1225,7 +1268,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str,
             prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
             total_tokens=meter.total_tokens, estimated_saved_tokens=saved,
             token_source=meter.source if meter.total_tokens else "gate", gated=True,
-            client=ACTIVE_CLIENT, actor=actor,
+            client=ACTIVE_CLIENT, actor=actor, sources=_source_trace(nodes),
         ))
         yield ESCALATION_LINE
         return
@@ -1283,7 +1326,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str,
             (delivered + "\n\n" + text).strip() if delivered else text,
             prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
             total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
-            client=ACTIVE_CLIENT, actor=actor,
+            client=ACTIVE_CLIENT, actor=actor, sources=_source_trace(nodes),
         ))
         fallback_handled = True
         return
@@ -1298,7 +1341,7 @@ async def answer_stream(query: str, clearance_level: str, platform: str,
                     f"{platform}_{clearance_level}", query, full,
                     prompt_tokens=meter.prompt_tokens, completion_tokens=meter.completion_tokens,
                     total_tokens=meter.total_tokens, token_source=meter.source, gated=False,
-                    client=ACTIVE_CLIENT, actor=actor,
+                    client=ACTIVE_CLIENT, actor=actor, sources=_source_trace(nodes),
                 ))
 
 

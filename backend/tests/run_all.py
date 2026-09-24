@@ -28,6 +28,7 @@ SUITES = [
     ("test_eval_harness.py", "the grader itself — it used to salvage a PASS it could not read"),
     ("test_resource_bounds.py", "per-request ceilings — the unbounded query + unbounded generation"),
     ("test_rate_limit.py", "per-caller request ceilings — the unbounded NUMBER of requests"),
+    ("test_traceability.py", "WHICH chunks fed an answer — reconstructing a bad one"),
 ]
 
 results = []
