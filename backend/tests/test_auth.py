@@ -182,9 +182,18 @@ section("fail-closed on misconfiguration")
 # THE POINT: required:true with no keys in the environment must refuse to boot.
 # Degrading to open access here would reintroduce the exact hole auth.py removes,
 # and it would do it silently on a deployment that believed it was protected.
+#
+# NOTE THE SEAM. The env-presence decision lives in _require_enforceable_auth.
+# It is invoked by the SERVER at startup via require_enforceable_auth_for_active(),
+# NOT by _load_all() — loading is also what ingestion and verification do, and they
+# must not need serving keys. _validate_auth keeps the STRUCTURAL checks and still
+# runs against every config at load. These were one function until 2026-09-24
+# (merging them coupled tenants — see the isolation section); the env-presence half
+# then moved out of the loader entirely on 2026-09-25 so a keyless tenant can still
+# be ingested and verified before its serving keys exist.
 with env(**NO_KEYS):
     try:
-        registry._validate_auth(with_auth(required=True), "test-config")
+        registry._require_enforceable_auth(with_auth(required=True), "test-config")
         check("required:true with NO key env vars refuses to boot", False,
               "validation passed")
     except SystemExit as e:
@@ -192,14 +201,14 @@ with env(**NO_KEYS):
 
     # required:false is the local-dev default and must still load.
     try:
-        registry._validate_auth(with_auth(required=False), "test-config")
+        registry._require_enforceable_auth(with_auth(required=False), "test-config")
         check("required:false loads with no keys (local dev)", True)
     except SystemExit:
         check("required:false loads with no keys (local dev)", False, "it refused")
 
 with env(**KEYS):
     try:
-        registry._validate_auth(with_auth(required=True), "test-config")
+        registry._require_enforceable_auth(with_auth(required=True), "test-config")
         check("required:true with keys present loads", True)
     except SystemExit:
         check("required:true with keys present loads", False, "it refused")
@@ -207,7 +216,7 @@ with env(**KEYS):
 # A partially-configured instance loads but must WARN, not pretend all roles work.
 with env(RAG_KEY_GUEST=GUEST, RAG_KEY_EMPLOYEE=None, RAG_KEY_EXECUTIVE=None):
     try:
-        registry._validate_auth(with_auth(required=True), "test-config")
+        registry._require_enforceable_auth(with_auth(required=True), "test-config")
         check("required:true with SOME keys loads (partial config)", True)
     except SystemExit:
         check("required:true with SOME keys loads (partial config)", False, "refused")
@@ -223,6 +232,106 @@ with env(**KEYS):
         check("required:true with an empty key map refuses to boot", False, "passed")
     except SystemExit as e:
         check("required:true with an empty key map refuses to boot", e.code == 1)
+
+
+# ---------------------------------------------------------------------------
+section("🔒 TENANT ISOLATION — one client's missing keys must not down another")
+# ---------------------------------------------------------------------------
+# REGRESSION, 2026-09-24. `_load_all()` validates EVERY clients/*.json, and the
+# env-presence check used to live in `_validate_auth`, so it ran against all of
+# them. Adding a second client config whose keys were not yet in .env therefore
+# made `sys.exit(1)` the boot path for the WHOLE APP — taking down a live tenant
+# whose own keys were perfectly valid. Found by adding the `demo` tenant: the
+# registry refused to load and `ejentic` went down with it.
+#
+# Multi-tenancy exists to stop one tenant affecting another, and availability is
+# one of the dimensions that counts. The 2026-09-24 fix scoped the env check to the
+# tenant RAG_CLIENT selects; on 2026-09-25 it moved out of the loader entirely, to a
+# serving gate the server calls at startup, so loading (ingest/verify) never trips
+# it. These assertions pin all of it: the sibling can't veto the boot, loading a
+# keyless served tenant still works, and SERVING it still fails closed.
+import json as _json  # noqa: E402
+import tempfile  # noqa: E402
+from pathlib import Path as _Path  # noqa: E402
+
+_real = _json.loads((_Path(__file__).resolve().parent.parent /
+                     "clients" / "ejentic.json").read_text())
+
+
+def _tenant(cid, env_prefix):
+    """A valid config for `cid` whose keys live in <PREFIX>_* env vars."""
+    cfg = dict(_real)
+    cfg["id"] = cid
+    cfg["namespace"] = f"{cid}-ns"
+    cfg["auth"] = {
+        "required": True,
+        "keys": {role: f"{env_prefix}_{role.upper()}"
+                 for role in ("guest", "employee", "executive")},
+        "admin_role": "executive",
+    }
+    return cfg
+
+
+_saved_dir, _saved_cache = registry.CLIENTS_DIR, registry._loaded
+with tempfile.TemporaryDirectory() as _td:
+    _dir = _Path(_td)
+    (_dir / "live.json").write_text(_json.dumps(_tenant("live", "LIVE_KEY")))
+    (_dir / "broken.json").write_text(_json.dumps(_tenant("broken", "BROKEN_KEY")))
+    registry.CLIENTS_DIR = _dir
+
+    # `live` has its keys; `broken` has none. Serving `live` must still work.
+    _live_keys = dict(LIVE_KEY_GUEST=GUEST, LIVE_KEY_EMPLOYEE=EMP,
+                      LIVE_KEY_EXECUTIVE=EXEC, BROKEN_KEY_GUEST=None,
+                      BROKEN_KEY_EMPLOYEE=None, BROKEN_KEY_EXECUTIVE=None)
+    try:
+        with env(RAG_CLIENT="live", **_live_keys):
+            registry._loaded = None
+            ids = sorted(registry._load_all())
+            check("a sibling tenant with NO keys does not stop the app booting",
+                  ids == ["broken", "live"], f"loaded={ids}")
+            check("...and the served tenant is the one selected",
+                  registry.active_client_id() == "live")
+    except SystemExit:
+        check("a sibling tenant with NO keys does not stop the app booting",
+              False, "the registry refused to load — the coupling is back")
+
+    # The other half: the tenant being SERVED must still refuse — but at SERVE
+    # time, not at LOAD time. Loading is what ingestion and verify_clearance.py do,
+    # and they have no use for the serving keys; enforcement is the server's job
+    # (main.py's lifespan calls require_enforceable_auth_for_active). So _load_all()
+    # must now LOAD a served-but-keyless tenant, and the serving gate is what stops
+    # it coming up. Pinning both halves keeps the seam from drifting back together.
+    with env(RAG_CLIENT="broken", **_live_keys):
+        registry._loaded = None
+        try:
+            registry._load_all()
+            check("a served tenant with no keys still LOADS (ingest/verify need this)", True)
+        except SystemExit:
+            check("a served tenant with no keys still LOADS (ingest/verify need this)",
+                  False, "loading refused — the serving gate leaked back into the loader")
+        try:
+            registry.require_enforceable_auth_for_active()
+            check("the SERVED tenant with no keys refuses to SERVE", False,
+                  "it would serve with unenforceable auth")
+        except SystemExit as e:
+            check("the SERVED tenant with no keys refuses to SERVE", e.code == 1)
+
+    # Structural errors stay global: a malformed config is a programming error
+    # whoever owns it, and it must not wait until that tenant is served.
+    _bad = _tenant("malformed", "MALFORMED_KEY")
+    _bad["auth"]["keys"]["guest"] = "an actual-secret-not-a-name"
+    (_dir / "malformed.json").write_text(_json.dumps(_bad))
+    try:
+        with env(RAG_CLIENT="live", **_live_keys):
+            registry._loaded = None
+            registry._load_all()
+            check("a SECRET pasted into a sibling's key map still fails at load",
+                  False, "it loaded")
+    except SystemExit as e:
+        check("a SECRET pasted into a sibling's key map still fails at load",
+              e.code == 1)
+
+registry.CLIENTS_DIR, registry._loaded = _saved_dir, _saved_cache
 
 # A SECRET pasted where an env-var NAME belongs is the mistake this pattern exists
 # to prevent, so the loader has to catch it.

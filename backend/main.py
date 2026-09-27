@@ -627,6 +627,13 @@ else:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Startup/shutdown. Replaces the deprecated @app.on_event("startup")."""
+    # SERVING GATE (fail-closed), before anything else runs: an instance whose
+    # active tenant declares auth.required:true but has no key env vars cannot
+    # authenticate anybody, so it must refuse to serve rather than come up believing
+    # it is protected. This lives here and NOT in the registry loader on purpose —
+    # ingest_knowledge.py and verify_clearance.py load the same config and must not
+    # need the serving keys to exist yet. See client_registry for the full history.
+    registry.require_enforceable_auth_for_active()
     await init_db()
     print(f"Audit Database Initialized ({DB_PATH}).")
     if not authmod.is_enabled(CFG):

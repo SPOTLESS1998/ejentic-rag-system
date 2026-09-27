@@ -1,0 +1,66 @@
+[
+  {
+    "text": "Harbourline Logistics is a fictional company. It does not exist. This knowledge base is sample data written to demonstrate a retrieval system publicly without exposing any real business's documents, and every figure, name, policy and contract in it is invented. It was built by Ejentic AI (https://ejentic.xyz), which builds systems like this over a client's own private documents.",
+    "clearance": "public"
+  },
+  {
+    "text": "Harbourline Logistics is a regional freight and warehousing operator serving the Gulf of Guinea coast, headquartered in Lagos with depots in Ibadan, Benin City and Port Harcourt. It moves palletised freight for manufacturers and retailers, and rents bonded warehouse space. Founded 2009. Roughly 400 staff.",
+    "clearance": "public"
+  },
+  {
+    "text": "Harbourline Logistics offers exactly five services: (1) Palletised road freight; (2) Bonded warehouse storage; (3) Last-mile urban delivery; (4) Customs brokerage and clearing; (5) Cold-chain transport for pharmaceuticals and food. That is the complete list. Harbourline does not offer air freight, sea freight, courier or parcel services, or international moving.",
+    "clearance": "public"
+  },
+  {
+    "text": "Harbourline Logistics standard transit times, depot to depot: Lagos to Ibadan, 1 working day. Lagos to Benin City, 2 working days. Lagos to Port Harcourt, 3 working days. Ibadan to Port Harcourt, 3 working days. Cold-chain shipments add one day for pre-cooling. Transit times are quoted from collection, not from booking, and exclude public holidays.",
+    "clearance": "public"
+  },
+  {
+    "text": "Harbourline Logistics publishes three freight service levels. Standard: the transit times above, no guarantee. Priority: same transit times with a booked delivery window, 35 percent surcharge. Critical: dedicated vehicle, no consolidation, quoted per job. Cold-chain is available on Priority and Critical only, never on Standard.",
+    "clearance": "public"
+  },
+  {
+    "text": "Harbourline Logistics customer service operates 07:00 to 19:00 West Africa Time, Monday to Saturday, closed Sundays and public holidays. Shipments are tracked at harbourline.example/track using the twelve-character consignment number on the collection receipt. Out-of-hours, only Critical service customers reach an on-call coordinator.",
+    "clearance": "public"
+  },
+  {
+    "text": "Harbourline Logistics damage and loss claims: report within 7 calendar days of delivery, with photographs and the signed delivery note. Standard service liability is capped at 50,000 naira per pallet. Priority and Critical are capped at the declared value where declared at booking. Claims are settled or refused within 21 working days. Consequential loss is never covered.",
+    "clearance": "public"
+  },
+  {
+    "text": "Harbourline Logistics late-shipment escalation runbook for staff. Hour 0 to 4 past the window: the depot coordinator calls the driver and updates the consignment note. Hour 4 to 12: the regional operations manager is paged and the customer is called proactively, before they call us. Past hour 12: it becomes an incident, the Head of Operations owns it, and a written account goes to the customer within 24 hours.",
+    "clearance": "internal"
+  },
+  {
+    "text": "Harbourline Logistics internal discount authority. A sales representative may approve up to 5 percent off published freight rates without sign-off. A regional manager may approve up to 12 percent. Anything above 12 percent, and any discount on cold-chain, requires the Commercial Director in writing. Discounts are never applied to customs brokerage fees, which are pass-through.",
+    "clearance": "internal"
+  },
+  {
+    "text": "Harbourline Logistics staff shift pattern: depot crews work four days on, two days off, 06:00 to 16:00 or 12:00 to 22:00. Overtime is paid at 1.5x after 45 hours in a week and must be approved in advance by the depot coordinator. Drivers are legally capped at 10 driving hours per day and must log a 45-minute break after 4.5 hours.",
+    "clearance": "internal"
+  },
+  {
+    "text": "Harbourline Logistics driver incident procedure. Any road traffic incident, however minor: stop, make the scene safe, photograph all vehicles and the load, and call the depot coordinator before moving the vehicle. Never admit liability at the scene and never negotiate directly with a third party. A drug and alcohol test is mandatory within 4 hours of any injury incident.",
+    "clearance": "internal"
+  },
+  {
+    "text": "Harbourline Logistics warehouse access control. The bonded area requires two-person entry at all times, logged on the gate register. Pallet movements in bond need a customs seal number recorded against the consignment. Personal phones are prohibited on the bonded floor. Access cards are revoked the same day a staff member leaves, by the depot coordinator, not by HR.",
+    "clearance": "internal"
+  },
+  {
+    "text": "Harbourline Logistics board figures, Q3, sample data. Revenue 2.15 billion naira, up 8 percent on Q2. Gross margin 31 percent, down from 34 percent on fuel and a higher Standard-service mix. Cold-chain is 9 percent of revenue at 47 percent margin and is the most profitable line. The Port Harcourt depot ran at a loss for the third consecutive quarter.",
+    "clearance": "executive"
+  },
+  {
+    "text": "Harbourline Logistics board strategy, sample data. The board has approved exploratory talks to acquire Calabar Cold Stores, a family-owned cold-chain warehouse operator, to convert the cold-chain line from rented to owned capacity. Maximum authorised consideration is 900 million naira. Talks are confidential and no approach has been made to staff or customers.",
+    "clearance": "executive"
+  },
+  {
+    "text": "Harbourline Logistics restructuring plan, sample data. The board is considering closing the Port Harcourt depot and serving the east from Benin City with a trunk route. This would affect 38 roles, of which 22 are drivers who could be redeployed. No decision has been taken and no announcement has been made. A decision is expected at the Q4 board meeting.",
+    "clearance": "executive"
+  },
+  {
+    "text": "Harbourline Logistics commercial risk register, sample data. Meridian Bottling, which is 14 percent of freight revenue, has put its haulage out to tender and Harbourline's contract expires in five months. Losing it would take group margin below 28 percent. Retention is the Commercial Director's first priority and a rate concession up to 15 percent has been pre-authorised to keep it.",
+    "clearance": "executive"
+  }
+]

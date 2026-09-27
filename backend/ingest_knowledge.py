@@ -197,9 +197,17 @@ def ingest(path: str, append: bool) -> None:
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Clearance-aware RAG ingestion.")
+    # Default to the ACTIVE tenant's OWN knowledge file, not a hardcoded Ejentic
+    # one. Without this, `RAG_CLIENT=demo python ingest_knowledge.py` with no
+    # --file would embed Ejentic's real corpus into the demo's PUBLIC namespace —
+    # the footgun was that the wrong thing was the default. `.get` falls back to
+    # the historical filename for any tenant that doesn't declare the key, so
+    # existing single-tenant behaviour is unchanged.
+    default_file = CFG.get("knowledge_file", "ejentic_knowledge.json")
     parser.add_argument(
-        "--file", default="ejentic_knowledge.json",
-        help="Path to the clearance-tagged knowledge JSON (default: ejentic_knowledge.json)",
+        "--file", default=default_file,
+        help=f"Path to the clearance-tagged knowledge JSON (default: the active "
+             f"tenant's knowledge_file, i.e. {default_file!r} for RAG_CLIENT={RAG_CLIENT!r})",
     )
     parser.add_argument(
         "--append", action="store_true",

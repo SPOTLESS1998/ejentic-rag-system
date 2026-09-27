@@ -308,27 +308,65 @@ def _validate_auth(cfg: dict, source: str) -> None:
                 f"ever perform administrative actions."
             )
 
-    if auth.get("required"):
-        if not keys:
-            _fatal(
-                f"{source}: auth.required is true but auth.keys is empty — no caller "
-                f"could ever be authenticated. Declare role -> env-var names."
-            )
-        unset = [f"{role} ({env})" for role, env in sorted(keys.items())
-                 if not (os.environ.get(env) or "").strip()]
-        if len(unset) == len(keys):
-            _fatal(
-                f"{source}: auth.required is true but NONE of the key env vars are "
-                f"set: {', '.join(unset)}. Generate one per role with "
-                f"`openssl rand -hex 32` and add them to backend/.env. Refusing to "
-                f"boot rather than serve an instance that cannot authenticate."
-            )
-        if unset:
-            print(
-                f"WARNING: {source}: auth is on but these roles have no key set, so "
-                f"they cannot be used: {', '.join(unset)}",
-                file=sys.stderr,
-            )
+    if auth.get("required") and not keys:
+        _fatal(
+            f"{source}: auth.required is true but auth.keys is empty — no caller "
+            f"could ever be authenticated. Declare role -> env-var names."
+        )
+
+
+def _unset_key_roles(cfg: dict) -> list:
+    """Roles whose key env var is absent or blank, as 'role (ENV_NAME)' strings.
+
+    Reports on the ENVIRONMENT, not on the config. Kept separate from _validate_auth
+    for the reason spelled out in _require_enforceable_auth below: the two failures
+    have different blast radii and must not share a code path.
+    """
+    keys = (cfg.get("auth") or {}).get("keys") or {}
+    return [f"{role} ({env})" for role, env in sorted(keys.items())
+            if not (os.environ.get(env) or "").strip()]
+
+
+def _require_enforceable_auth(cfg: dict, source: str) -> None:
+    """Refuse to boot if the tenant THIS PROCESS SERVES cannot authenticate anybody.
+
+    An instance that declares `required: true` with no key values in its environment
+    would degrade to "nobody can get in" at best and, with a bug, to open access at
+    worst. Either way it is an operator error, so we stop loudly at load rather than
+    serve a single query.
+
+    ⚠️ WHY THIS IS SCOPED TO THE ACTIVE TENANT, AND MUST STAY THAT WAY.
+    This check used to run from _validate_auth, i.e. against EVERY clients/*.json,
+    because _load_all() validates them all. That coupled tenants together in the one
+    dimension multi-tenancy exists to separate: adding a second client config whose
+    keys were not yet in .env made `sys.exit(1)` the boot path for the WHOLE app,
+    taking down a live tenant whose own keys were perfectly valid. Measured
+    2026-09-24 while adding the `demo` tenant — the registry refused to load and
+    `ejentic` went down with it.
+
+    A missing key is a fact about this process's environment, and this process serves
+    exactly one tenant (RAG_CLIENT). So the tenant being served is still validated as
+    strictly as before, and a sibling config can no longer decide whether it boots.
+    Structural checks stay global on purpose: a malformed config is a programming
+    error whoever owns it, and catching those early costs nothing.
+    """
+    if not (cfg.get("auth") or {}).get("required"):
+        return
+    keys = (cfg.get("auth") or {}).get("keys") or {}
+    unset = _unset_key_roles(cfg)
+    if unset and len(unset) == len(keys):
+        _fatal(
+            f"{source}: auth.required is true but NONE of the key env vars are "
+            f"set: {', '.join(unset)}. Generate one per role with "
+            f"`openssl rand -hex 32` and add them to backend/.env. Refusing to "
+            f"boot rather than serve an instance that cannot authenticate."
+        )
+    if unset:
+        print(
+            f"WARNING: {source}: auth is on but these roles have no key set, so "
+            f"they cannot be used: {', '.join(unset)}",
+            file=sys.stderr,
+        )
 
 
 def tenant_clearance_tags(cfg: dict) -> list:
@@ -419,6 +457,14 @@ def _load_all() -> dict[str, dict[str, Any]]:
     if not registry:
         _fatal("no client configs found under backend/clients/")
 
+    # NB: auth ENFORCEABILITY (are the key env vars actually PRESENT in this
+    # environment?) is deliberately NOT checked here. Loading a config is also what
+    # ingest_knowledge.py and verify_clearance.py do, and they have no use for the
+    # serving keys — gating the load on key presence made a freshly-added tenant
+    # un-ingestable until its serving keys existed, and blocked verification too.
+    # That question belongs to the SERVER, which asks it once at startup via
+    # require_enforceable_auth_for_active(). Structural validation above stays
+    # global on purpose: a malformed config is a programming error whoever serves it.
     _loaded = registry
     return registry
 
@@ -443,6 +489,23 @@ def get_client(client_id: str | None = None) -> dict[str, Any]:
             f"client '{cid}' not registered. Available: {', '.join(sorted(registry))}"
         )
     return registry[cid]
+
+
+def require_enforceable_auth_for_active() -> None:
+    """SERVING GATE — call once at server startup; fail-closed if auth can't work.
+
+    Refuses to serve when the active tenant (RAG_CLIENT) declares `auth.required:
+    true` but none of its key env vars are set: such an instance believes it is
+    protected while being unable to authenticate anybody. Deliberately kept OUT of
+    _load_all so ingestion, verification and tests — which load the same config but
+    serve nothing — never need the serving keys to exist. See main.py's `lifespan`
+    for the single call site, and _require_enforceable_auth for the check itself and
+    the 2026-09-24 tenant-coupling history that shaped where it lives.
+    """
+    reg = _load_all()
+    intended = os.environ.get("RAG_CLIENT", "ejentic").strip() or "ejentic"
+    if intended in reg:
+        _require_enforceable_auth(reg[intended], f"{intended}.json")
 
 
 def list_clients() -> list[dict[str, Any]]:
