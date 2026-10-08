@@ -4,11 +4,15 @@
     "clearance": "public"
   },
   {
+    "text": "Ejentic's Core Offers, the complete set of four: Core Offer 1 - The Ejentic AI Knowledge Core, a fully managed enterprise-grade hybrid RAG system over your internal knowledge base. Core Offer 2 - Autonomous Customer Support Agents, delivered as the Support Specialist, which handles Tier-1 customer support end to end. Core Offer 3 - The Ejentic Lead Generation System, an AI pipeline that sources, qualifies and enriches sales prospects. Core Offer 4 - AI Consulting & Team Enablement, advisory engagements that help teams adopt and operate agentic AI.",
+    "clearance": "public"
+  },
+  {
     "text": "Core Offer 1: The Ejentic AI Knowledge Core. This is a fully managed, enterprise-grade hybrid RAG system designed to securely index your company's entire internal knowledge base. It uses Pinecone for vector storage and supports both cloud and on-premise deployments.",
     "clearance": "public"
   },
   {
-    "text": "Core Offer 2: Autonomous HR & Customer Success Agents. We build bespoke AI agents capable of replacing level-1 support and internal HR ticketing. These agents feature deep tool integration, meaning they can query SQL databases, send emails, and schedule meetings autonomously.",
+    "text": "Core Offer 2: Autonomous Customer Support Agents. We build bespoke AI agents that fully handle Tier-1 customer support - authenticating the customer, answering the question, and closing the ticket without a human in the loop. These agents feature deep tool integration, meaning they can query SQL databases, send emails, and schedule meetings autonomously. This offer is delivered as the Support Specialist.",
     "clearance": "public"
   },
   {
@@ -44,7 +48,7 @@
     "clearance": "public"
   },
   {
-    "text": "Ejentic services overview (complete list). Ejentic builds custom AI agents, automations and Retrieval-Augmented Generation (RAG) systems that perform work under client supervision. The five current areas of expertise are: (1) AI agents - autonomous, conversational agents that interact with customers 24/7; (2) Automations - automating recurring workflows and integrating systems; (3) RAG systems - enterprise-grade Retrieval-Augmented Generation grounded in a private knowledge base for accurate, secure, context-aware answers; (4) Consultation - strategic guidance on AI implementation; (5) Research - problem-solving through AI research and global collaborations. Three ready-to-deploy agent products are offered: the Lead Generation System, the Support Specialist, and the Data Analyst. Listed as coming soon, not yet available: Web & App Development, Auditing, Finance, Academy, and Cybersecurity.",
+    "text": "Ejentic services overview (complete list). Ejentic builds custom AI agents, automations and Retrieval-Augmented Generation (RAG) systems that perform work under client supervision. The six current areas of expertise are: (1) AI agents - autonomous, conversational agents that interact with customers 24/7; (2) Automations - automating recurring workflows and integrating systems; (3) RAG systems - enterprise-grade Retrieval-Augmented Generation grounded in a private knowledge base for accurate, secure, context-aware answers; (4) Consultation - strategic guidance on AI implementation; (5) Academy - training to help teams learn to build and operate AI agents; (6) Research - problem-solving through AI research and global collaborations. Three ready-to-deploy agent products are offered: the Lead Generation System, the Support Specialist, and the Data Analyst.",
     "clearance": "public"
   },
   {
@@ -116,7 +120,7 @@
     "clearance": "public"
   },
   {
-    "text": "Ejentic Academy is an announced Ejentic initiative with a page at https://ejentic.xyz/academy, positioned as \"Master Artificial Intelligence\" and \"Learn to build AI agents\", using a skill-tree metaphor: navigate the skill tree, unlock specialized branches, command autonomous systems. It is also listed among Ejentic's \"coming soon\" areas of expertise. As of September 2026 no curriculum, course list, cohort schedule, instructor, price or enrolment path has been published, and the Academy is not yet a purchasable offering. Anyone interested should watch /academy or ask via https://ejentic.xyz/contact.",
+    "text": "Ejentic Academy is one of Ejentic's areas of expertise, with a page at https://ejentic.xyz/academy, positioned as \"Master Artificial Intelligence\" and \"Learn to build AI agents\", using a skill-tree metaphor: navigate the skill tree, unlock specialized branches, command autonomous systems. As of September 2026, however, no curriculum, course list, cohort schedule, instructor, price or enrolment path has been published, so the Academy is announced but not yet a purchasable offering - you cannot enrol today. Anyone interested should watch /academy or ask via https://ejentic.xyz/contact.",
     "clearance": "public"
   }
 ]
