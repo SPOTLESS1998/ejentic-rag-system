@@ -134,6 +134,10 @@ Fill in: `RAG_CLIENT`, `PINECONE_API_KEY`, `NVIDIA_API_KEY`, the three `RAG_KEY_
 `RAG_UI_KEY` (Decision 2 — the **value** of one of them, normally guest), and `RAG_CORS_ORIGINS`
 (your real `https://` origin).
 
+If this box also drives the **public website live-demo**, fill in the three `RAG_DEMO_KEY_*` as
+well (`openssl rand -hex 32` each, all different from the `RAG_KEY_*` above). Leave them blank
+otherwise — see the "Demo tenant" section after step 5.
+
 It lives in `/etc`, not in the checkout, on purpose: `git clean` cannot delete it and `git add -A`
 cannot commit it.
 
@@ -184,6 +188,57 @@ and fix it before going any further.
 deploy. `auth.required` is `true` in the client config, and with the `RAG_KEY_*` variables missing the
 server declines to start rather than serve an instance that cannot authenticate anyone. Check
 `docker compose logs backend` before looking anywhere else.
+
+### Demo tenant — the public website live-demo (optional)
+
+Skip this entire section unless this box also drives the live demo on the marketing site. It adds a
+**second** backend, `backend-demo` (`RAG_CLIENT=demo`), that answers from a wholly fictional company
+in its own `demo-sandbox` namespace — never a real Ejentic or client document. The website's
+`/api/rag-demo` proxy is the only thing that talks to it, on `127.0.0.1:8012`. Caddy must **never**
+proxy 8012; the one public path in stays the frontend.
+
+1. **Keys.** The three `RAG_DEMO_KEY_*` must be in `/etc/ejentic-rag/server.env` (step 3). Without
+   them `backend-demo` refuses to boot — the same fail-closed gate as the real backend, working, not
+   a broken deploy. The ejentic backend ignores these vars, so one secret file serves both.
+
+2. **Ingest the fictional corpus** into its namespace. This writes to Pinecone, so it can run here or
+   from the laptop — it needs `PINECONE_API_KEY` and `NVIDIA_API_KEY` in the environment:
+
+   ```bash
+   RAG_CLIENT=demo python ingest_knowledge.py
+   ```
+
+   `RAG_CLIENT=demo` makes it read `demo_knowledge.json` into `demo-sandbox`. The rebuild's delete is
+   namespace-scoped, so this cannot touch the ejentic vectors even if pointed at the wrong file.
+
+3. **Bring it up** with the `demo` profile — a plain `up -d` never starts it:
+
+   ```bash
+   docker compose -f docker-compose.prod.yml --profile demo up -d
+   docker compose -f docker-compose.prod.yml logs -f backend-demo
+   ```
+
+   The prod systemd unit (`deploy/ejentic-rag.service`) already carries `--profile demo`, so a reboot
+   brings the demo back up too.
+
+4. **Verify the boundary on `:8012`**, backend-direct (the proxy is not involved yet). A guest-tier
+   question answers from the fictional corpus; asking above the key's tier is a loud **403**, never a
+   silent downgrade — the same property step 7 proves for the real tenant:
+
+   ```bash
+   K='<the RAG_DEMO_KEY_GUEST value>'
+   # In-tier question -> a real answer from the fictional corpus
+   curl -s -X POST http://127.0.0.1:8012/api/rag \
+     -H "X-API-Key: $K" -H 'Content-Type: application/json' \
+     -d '{"query":"What are your support hours?"}'
+   # Asking ABOVE the key's tier -> 403, never a quiet clamp
+   curl -s -o /dev/null -w '%{http_code}\n' -X POST http://127.0.0.1:8012/api/rag \
+     -H "X-API-Key: $K" -H 'Content-Type: application/json' \
+     -d '{"query":"hi","clearance_level":"executive"}'          # 403
+   ```
+
+   (Note the backend path is `/api/rag`, not the frontend's `/api/rag/chat` — you are hitting the
+   container directly, below the UI proxy.)
 
 ### 6. Put Caddy in front — the point of no return
 
@@ -565,6 +620,11 @@ cd /opt/ejentic-rag && sudo bash -c 'set -a; . /etc/ejentic-rag/server.env; set 
 `--no-build` is the load-bearing flag — without it compose rebuilds and you land straight back on the
 code you were trying to roll away from. This is also why you should not `docker image prune -a`
 immediately after a deploy: that previous image *is* your rollback.
+
+If this box runs the **demo profile**, append `--profile demo` to the Path B command so compose rolls
+the demo container back in the same operation instead of leaving it running on the image you are
+backing away from. Path A needs no change — `systemctl restart` uses the service unit, which already
+carries `--profile demo`.
 
 The audit DB is on a named volume (`rag_data`), so it is untouched by rollbacks and by
 `docker compose down`. Only `docker compose down -v` destroys it — which is also the only way to

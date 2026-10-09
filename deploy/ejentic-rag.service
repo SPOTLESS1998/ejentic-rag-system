@@ -22,7 +22,15 @@ EnvironmentFile=/etc/ejentic-rag/server.env
 # Foreground (`up`, not `up -d`) so systemd tracks the real process and Restart=
 # means something. `--remove-orphans` cleans up the dev-only n8n container if this
 # box ever ran the dev compose file.
-ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml up --remove-orphans
+#
+# `--profile demo` starts backend-demo — the RAG_CLIENT=demo instance that the public
+# website live-demo proxies to on 127.0.0.1:8012. It is a profile (not default-on) so a
+# bare `up -d` stays minimal for validation, but PROD must run it, so the service opts
+# in here. Prerequisite: the three RAG_DEMO_KEY_* must be in server.env AND the
+# demo-sandbox namespace must be ingested, or backend-demo fails its boot gate
+# (main.py:631) and crash-loops. See deploy/GO_LIVE.md §"Demo tenant". (Add
+# `--profile internal` as well if this box also staffs the internal UI.)
+ExecStart=/usr/bin/docker compose -f docker-compose.prod.yml --profile demo up --remove-orphans
 ExecStop=/usr/bin/docker compose -f docker-compose.prod.yml down
 
 # 🔴 BUILDING IS NOT IN THE START PATH — REMOVED 2026-09-20, AND THE ARITHMETIC

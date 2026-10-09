@@ -8,17 +8,27 @@
 #
 # WHAT THIS FILE CHANGES, AND WHY EACH ONE MATTERS
 # -----------------------------------------------
-#  1. The backend publishes on 127.0.0.1:8002 — LOOPBACK ONLY, by deliberate choice.
-#     It is reachable by the frontend over the internal compose network, and now
-#     also by other processes ON THIS SAME BOX — specifically the main ai-agency
-#     site, which drives the public live-demo through the real engine server-side.
-#     ⚠️ The `127.0.0.1:` prefix is load-bearing. A bare `8002:8002` (as in the dev
-#     file) binds 0.0.0.0 and puts the API on the PUBLIC interface — never copy that
-#     here. With the prefix the port answers only to callers already on the box.
+#  1. The REAL (ejentic) backend publishes NO host port. It is reachable only on the
+#     internal compose network, by the frontend services via http://backend:8002 —
+#     which needs no published port. The public website live-demo is NOT driven by
+#     this process: it is served by a SECOND backend, `backend-demo`, booted as
+#     RAG_CLIENT=demo over a wholly fictional corpus in its own namespace. That demo
+#     backend is the ONLY backend published to the host — 127.0.0.1:8012, loopback
+#     only — so the co-located ai-agency site can proxy the public demo through it
+#     server-side. It sits behind the `demo` profile, so the prod bring-up command is:
+#         docker compose -f docker-compose.prod.yml --profile demo up -d
+#     (plain `up -d` is unchanged — backend + public frontend, exactly as before.)
+#     ⚠️ The `127.0.0.1:` prefix on backend-demo is load-bearing. A bare `8012:8002`
+#     binds 0.0.0.0 and puts the API on the PUBLIC interface — never drop the prefix.
 #     Auth still holds regardless (auth.required=true, every caller needs a key) and
-#     ufw allows only 22/80/443, so the loopback bind is defence in depth, not the
-#     only lock. Caddy must still NEVER proxy :8002 — the one public path in is the
-#     frontend on 3002.
+#     ufw allows only 22/80/443. Caddy must NEVER proxy 8012 — the one public path in
+#     is still the frontend on 3002.
+#     WHY the real backend is NOT published: it is single-tenant (main.py:207 fixes the
+#     tenant at boot), so a demo key sent to it is a 409 by design — publishing it
+#     bought the demo nothing (the demo uses backend-demo) and put the real corpus on
+#     the box's loopback for no consumer. That publish (commit 8b05212) is reverted
+#     here. If the site ever needs the REAL engine — an authenticated internal tool,
+#     not the public demo — publish it THEN, with that justification.
 #  2. The frontend publishes to 127.0.0.1 ONLY. Caddy on the same box is the single
 #     path in from the internet, terminating TLS. Same shape as the lead-gen
 #     approval server (see deploy/Caddyfile.rag).
@@ -82,11 +92,14 @@ services:
         # that the logs carry "[rerank] Local sentence-transformers cross-encoder
         # active". See backend/Dockerfile.prod.
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
-    # Loopback only — see note 1 at the top of this file. Lets the co-located main
-    # ai-agency site proxy the public live-demo through the real engine, server-side.
-    # The 127.0.0.1 prefix is what keeps it off the public interface; never drop it.
-    ports:
-      - "127.0.0.1:8002:8002"
+    # NO host port — deliberately. This service holds the REAL corpus and is reachable
+    # only on the internal compose network; the frontends use http://backend:8002,
+    # which needs no published port. The public live-demo talks to the `backend-demo`
+    # service below instead, so the real corpus stays off the host entirely. See note 1
+    # at the top of this file for why 8b05212's 127.0.0.1:8002 publish was reverted. Do
+    # NOT re-add a host port here for the demo — single-tenant-per-process means a demo
+    # key sent here is a 409 (main.py:835), so it would expose the real engine for zero
+    # demo benefit.
     # All of the tenant's secrets and tuning. Absolute path: the secret file lives
     # OUTSIDE the git checkout, so a `git clean` or a fresh clone cannot destroy it
     # and a stray `git add -A` cannot commit it.
@@ -109,6 +122,75 @@ services:
     deploy:
       resources:
         limits:
+          memory: 4G
+
+  # ── THE PUBLIC LIVE-DEMO BACKEND ─────────────────────────────────────────────
+  # A SECOND backend process — identical image and code — booted as RAG_CLIENT=demo.
+  # This is what the co-located ai-agency site's /api/rag-demo proxy talks to, and the
+  # ONLY backend published to the host (127.0.0.1:8012). It serves clients/demo.json:
+  # the demo-sandbox namespace, a wholly fictional company, its own RAG_DEMO_KEY_*.
+  #
+  # WHY A SEPARATE CONTAINER, NOT THE ejentic BACKEND ABOVE
+  # -------------------------------------------------------
+  # The backend is single-tenant-per-process: main.py:207 fixes the tenant at boot from
+  # RAG_CLIENT, main.py:211 fixes the Pinecone namespace, and a request for any other
+  # tenant is a loud 409 (main.py:835). So the demo CANNOT be served by the ejentic
+  # process — it needs its own instance pinned to RAG_CLIENT=demo. Isolation is enforced
+  # by the process/namespace boundary, not by a trusted branch inside one shared
+  # process; that is the same reason the request body's clearance_level may only narrow,
+  # never widen. A compromise of this internet-adjacent demo reaches only fictional
+  # vectors — no genuine Ejentic or client document is in its namespace or its keys.
+  #
+  # OPT-IN via the `demo` profile, exactly like frontend-internal. Plain `up -d` does
+  # NOT start it; `--profile demo up -d` does. The gate is deliberate: demo.json sets
+  # auth.required=true, so this container REFUSES to serve until the three RAG_DEMO_KEY_*
+  # are present (the boot gate at main.py:631). Generate them into server.env FIRST
+  # (`openssl rand -hex 32` each, never committed), THEN bring the profile up — otherwise
+  # it would crash-loop, reloading the cross-encoder on every restart.
+  backend-demo:
+    profiles: ["demo"]
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+      args:
+        # CPU-only torch, same as the ejentic backend and for the same reasons — see
+        # the long note on the backend service above. Keep the two in lockstep.
+        TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    # THE tenant switch, and the only meaningful difference from `backend`. Unset on the
+    # ejentic service (so it defaults in); set to demo here so this process loads
+    # clients/demo.json and serves the demo-sandbox namespace and nothing else.
+    environment:
+      RAG_CLIENT: demo
+      # Moot in practice — only the server-side proxy calls this, never a browser, so
+      # there is no Origin to check — but mirrored for uniformity, and the var is
+      # already required by the ejentic backend in the same `up`.
+      CORS_ORIGINS: ${RAG_CORS_ORIGINS:?set RAG_CORS_ORIGINS to your https origin}
+    # Loopback only. Host 8012 maps to the container's internal 8002 — every backend
+    # container listens on 8002 inside itself (Dockerfile CMD), so the host number is
+    # just the external label. The 127.0.0.1 prefix keeps it off the public interface;
+    # never drop it (a bare 8012:8002 binds 0.0.0.0). Caddy must never proxy it.
+    ports:
+      - "127.0.0.1:8012:8002"
+    # The SAME secret file as the ejentic backend: it holds the shared infra keys
+    # (Pinecone, NVIDIA, Gemini) AND the RAG_DEMO_KEY_* this tenant authenticates with.
+    # The ejentic process ignores the demo keys (ejentic.json names different env vars),
+    # so one file serving both is fine.
+    env_file:
+      - ${RAG_SERVER_ENV:-/etc/ejentic-rag/server.env}
+    volumes:
+      # Its OWN named volume, NOT rag_data. The demo's audit trail, uploads and cached
+      # weights stay separate from the real tenant's: two processes sharing one SQLite
+      # audit DB would contend, and mingling the trails defeats the isolation this split
+      # exists for. Cost: the cross-encoder weights download once per volume (a few
+      # hundred MB, twice, on first boot) — accepted for the isolation.
+      - rag_demo_data:/app/data
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          # Same ceiling as the ejentic backend — the reranker is the memory hog and
+          # this loads the same model. NOTE: with the demo profile up this roughly
+          # doubles the stack's memory ceiling (two 4G backends); confirm box headroom.
           memory: 4G
 
   frontend:
@@ -201,3 +283,6 @@ services:
 
 volumes:
   rag_data:
+  # The demo tenant's own audit DB, uploads and cached cross-encoder weights, kept
+  # out of rag_data so the fictional demo and the real tenant never share state.
+  rag_demo_data:
