@@ -66,9 +66,22 @@ sentence-transformers==3.4.1
 # different torch than the one this system was verified on — against a
 # sentence-transformers that is deliberately pinned to the 3.x line just above.
 # Nothing in git would explain the resulting breakage, which is exactly the
-# failure this file's header was written to prevent. Pinned 2026-09-10 to the
-# version the live container is actually running (torch 2.14.0+cu130, confirmed
-# in production), so a boot-time rebuild reproduces the verified image.
+# failure this file's header was written to prevent.
+#
+# ⚠️ 2026-10-09 CORRECTION — this line read `torch==2.14.0`, and that pin pulled a
+# CUDA build that nearly filled the box's disk mid-deploy. Both the version and
+# the old note ("2.14.0+cu130, confirmed in production") were wrong: the live
+# image is 2.08 GB, i.e. CPU-only — a cu130 wheel would make it ~10 GB.
+# Dockerfile.prod installs a CPU-only torch FIRST from the CPU wheel index
+# (--index-url .../whl/cpu), THEN runs this file. The CPU index serves 2.14.1 as
+# its +cpu wheel, NOT 2.14.0 — so `==2.14.0` here was unsatisfied by the
+# already-installed CPU wheel, and `pip install -r` reinstalled torch from PyPI,
+# whose aarch64 2.14.0 wheel drags in cuda_toolkit + nvidia_cudnn_cu13 (~6 GB).
+# That is the outage deploy/ejentic-rag.service documents. Fix: pin BOTH this line
+# and the Dockerfile's CPU-index install to 2.14.1. `==2.14.1` is satisfied by the
+# installed `2.14.1+cpu` (PEP 440 matches a release specifier to its local wheel),
+# so pip does not reinstall and no CUDA is pulled. Keep the two in LOCKSTEP: bump
+# one and you must bump the other, or the CUDA reinstall returns silently.
 torch==2.2.2;   sys_platform == "darwin" and platform_machine == "x86_64"
 numpy==1.26.4;  sys_platform == "darwin" and platform_machine == "x86_64"
-torch==2.14.0;  sys_platform != "darwin" or platform_machine != "x86_64"
+torch==2.14.1;  sys_platform != "darwin" or platform_machine != "x86_64"

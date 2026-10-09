@@ -53,9 +53,17 @@ ENV PATH="/opt/venv/bin:$PATH"
 # stays empty so anyone building elsewhere gets the original behaviour; the
 # decision lives in the compose file, where it cannot be forgotten on a rebuild.
 ARG TORCH_INDEX_URL=""
+# The torch installed below is PINNED and MUST equal requirements.txt's Linux
+# torch pin (both 2.14.1 as of 2026-10-09). It was unpinned (`torch`), which
+# installs the CPU index's LATEST +cpu wheel; when requirements.txt then pinned a
+# DIFFERENT exact version, the `-r requirements.txt` step reinstalled torch from
+# PyPI and pulled the ~6 GB CUDA stack onto this GPU-less box — the disk outage
+# deploy/ejentic-rag.service documents. Pinning both in lockstep keeps it CPU-only;
+# bump one and you must bump the other. (A `#` comment cannot live INSIDE the
+# backslash-continued RUN below — it would comment out the install — so it is here.)
 RUN pip install --no-cache-dir --upgrade pip \
  && if [ -n "$TORCH_INDEX_URL" ]; then \
-      pip install --no-cache-dir --index-url "$TORCH_INDEX_URL" torch; \
+      pip install --no-cache-dir --index-url "$TORCH_INDEX_URL" "torch==2.14.1"; \
     fi \
  && pip install --no-cache-dir -r requirements.txt
 
