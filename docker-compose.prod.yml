@@ -8,11 +8,17 @@
 #
 # WHAT THIS FILE CHANGES, AND WHY EACH ONE MATTERS
 # -----------------------------------------------
-#  1. The backend publishes NO port. It is reachable only by the frontend, over the
-#     internal compose network. The dev file has `8002:8002`, which puts the API on
-#     the public interface next to the UI. Auth still holds there — this is not a
-#     hole — but it widens the surface for no benefit and makes a mistyped
-#     CORS_ORIGINS suddenly load-bearing.
+#  1. The backend publishes on 127.0.0.1:8002 — LOOPBACK ONLY, by deliberate choice.
+#     It is reachable by the frontend over the internal compose network, and now
+#     also by other processes ON THIS SAME BOX — specifically the main ai-agency
+#     site, which drives the public live-demo through the real engine server-side.
+#     ⚠️ The `127.0.0.1:` prefix is load-bearing. A bare `8002:8002` (as in the dev
+#     file) binds 0.0.0.0 and puts the API on the PUBLIC interface — never copy that
+#     here. With the prefix the port answers only to callers already on the box.
+#     Auth still holds regardless (auth.required=true, every caller needs a key) and
+#     ufw allows only 22/80/443, so the loopback bind is defence in depth, not the
+#     only lock. Caddy must still NEVER proxy :8002 — the one public path in is the
+#     frontend on 3002.
 #  2. The frontend publishes to 127.0.0.1 ONLY. Caddy on the same box is the single
 #     path in from the internet, terminating TLS. Same shape as the lead-gen
 #     approval server (see deploy/Caddyfile.rag).
@@ -76,6 +82,11 @@ services:
         # that the logs carry "[rerank] Local sentence-transformers cross-encoder
         # active". See backend/Dockerfile.prod.
         TORCH_INDEX_URL: https://download.pytorch.org/whl/cpu
+    # Loopback only — see note 1 at the top of this file. Lets the co-located main
+    # ai-agency site proxy the public live-demo through the real engine, server-side.
+    # The 127.0.0.1 prefix is what keeps it off the public interface; never drop it.
+    ports:
+      - "127.0.0.1:8002:8002"
     # All of the tenant's secrets and tuning. Absolute path: the secret file lives
     # OUTSIDE the git checkout, so a `git clean` or a fresh clone cannot destroy it
     # and a stray `git add -A` cannot commit it.
