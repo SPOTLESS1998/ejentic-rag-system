@@ -1,0 +1,479 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>RAG Engagement Field Guide</title>
+<meta name="description" content="How Ejentic takes a client RAG system from first handshake to a maintained, clearance-aware knowledge base — the technical and the social side.">
+<script>
+  // Pre-paint: apply the stored theme before first paint to avoid a flash.
+  try { var t = localStorage.getItem('rag-fg-theme'); if (t === 'dark' || t === 'light') document.documentElement.setAttribute('data-theme', t); } catch (e) {}
+</script>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Fraunces:opsz,wght@9..144,500;9..144,600&family=IBM+Plex+Mono:wght@400;500&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap">
+<style>
+  /* ---- Tokens: light is the base; dark is redefined in two guarded blocks ---- */
+  :root {
+    --bg:#F5F7F6; --surface:#FFFFFF; --surface-2:#EFF3F1;
+    --ink:#15201E; --ink-dim:#495553; --ink-faint:#879592;
+    --hairline:#DCE3E0; --hairline-strong:#C7D1CD;
+    --accent:#0F766E; --accent-text:#0C5E57; --accent-quiet:rgba(15,118,110,.10); --on-accent:#FFFFFF;
+    --good:#1A7F4B; --good-quiet:rgba(26,127,75,.12);
+    --warn:#8A5A00; --warn-quiet:rgba(176,120,10,.14);
+    --bad:#B4322C; --bad-quiet:rgba(180,50,44,.12);
+    --code-bg:#102320; --code-ink:#D6E6E1; --code-faint:#7FA49C; --code-accent:#5EE6D3;
+    --focus:#0F766E;
+    --sp-1:.4rem; --sp-2:.75rem; --sp-3:1.1rem; --sp-4:1.6rem; --sp-5:2.4rem; --sp-6:3.6rem;
+    --radius:10px; --radius-sm:7px;
+    --maxw:1180px;
+    --sans:'IBM Plex Sans',system-ui,-apple-system,Segoe UI,Roboto,sans-serif;
+    --serif:'Fraunces',Georgia,'Times New Roman',serif;
+    --mono:'IBM Plex Mono',ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg:#0B1312; --surface:#111D1B; --surface-2:#16231F;
+      --ink:#E8EEEC; --ink-dim:#9EACA8; --ink-faint:#64736F;
+      --hairline:#223230; --hairline-strong:#2E403D;
+      --accent:#2DD4BF; --accent-text:#67E8D5; --accent-quiet:rgba(45,212,191,.13); --on-accent:#05211D;
+      --good:#49C47F; --good-quiet:rgba(73,196,127,.15);
+      --warn:#E0B457; --warn-quiet:rgba(224,180,87,.14);
+      --bad:#F0756C; --bad-quiet:rgba(240,117,108,.14);
+      --code-bg:#0A1716; --code-ink:#CFE2DD; --code-faint:#6F938B; --code-accent:#5EE6D3;
+      --focus:#2DD4BF;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg:#0B1312; --surface:#111D1B; --surface-2:#16231F;
+    --ink:#E8EEEC; --ink-dim:#9EACA8; --ink-faint:#64736F;
+    --hairline:#223230; --hairline-strong:#2E403D;
+    --accent:#2DD4BF; --accent-text:#67E8D5; --accent-quiet:rgba(45,212,191,.13); --on-accent:#05211D;
+    --good:#49C47F; --good-quiet:rgba(73,196,127,.15);
+    --warn:#E0B457; --warn-quiet:rgba(224,180,87,.14);
+    --bad:#F0756C; --bad-quiet:rgba(240,117,108,.14);
+    --code-bg:#0A1716; --code-ink:#CFE2DD; --code-faint:#6F938B; --code-accent:#5EE6D3;
+    --focus:#2DD4BF;
+  }
+
+  * { box-sizing:border-box; }
+  html { scroll-behavior:smooth; scroll-padding-top:1.5rem; -webkit-text-size-adjust:100%; }
+  @media (prefers-reduced-motion: reduce) { html { scroll-behavior:auto; } }
+  body {
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:var(--sans); font-size:17px; line-height:1.62;
+    font-weight:400; letter-spacing:-.003em;
+    -webkit-font-smoothing:antialiased;
+  }
+  .wrap { max-width:var(--maxw); margin:0 auto; padding:0 clamp(16px,4vw,40px); }
+
+  /* ---- Header ---- */
+  header.site { padding:var(--sp-6) 0 var(--sp-4); border-bottom:1px solid var(--hairline); }
+  .eyebrow { font-family:var(--mono); font-size:.72rem; letter-spacing:.18em; text-transform:uppercase; color:var(--accent-text); margin:0 0 var(--sp-2); }
+  h1 { font-family:var(--serif); font-weight:600; font-size:clamp(2.1rem,5.4vw,3.4rem); line-height:1.04; letter-spacing:-.02em; margin:0 0 var(--sp-3); text-wrap:balance; }
+  .lede { font-size:clamp(1.05rem,2.2vw,1.3rem); color:var(--ink-dim); max-width:58ch; margin:0; line-height:1.5; }
+  .toolbar { display:flex; gap:var(--sp-2); align-items:center; flex-wrap:wrap; margin-top:var(--sp-4); }
+  .toggle {
+    font-family:var(--mono); font-size:.78rem; color:var(--ink-dim); cursor:pointer;
+    background:var(--surface); border:1px solid var(--hairline-strong); border-radius:var(--radius-sm);
+    padding:.5rem .8rem; display:inline-flex; align-items:center; gap:.5rem;
+  }
+  .toggle:hover { color:var(--ink); border-color:var(--accent); }
+  .toggle:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+  .stamp { font-family:var(--mono); font-size:.72rem; color:var(--ink-faint); }
+
+  /* ---- Layout: sticky TOC + content on wide screens ---- */
+  .layout { display:grid; grid-template-columns:1fr; gap:var(--sp-5); padding:var(--sp-5) 0 var(--sp-6); }
+  @media (min-width:960px) { .layout { grid-template-columns:232px minmax(0,1fr); gap:var(--sp-6); } }
+  nav.toc { font-size:.9rem; }
+  @media (min-width:960px) { nav.toc { position:sticky; top:1.5rem; align-self:start; max-height:calc(100vh - 3rem); overflow:auto; } }
+  nav.toc .toc-h { font-family:var(--mono); font-size:.7rem; letter-spacing:.16em; text-transform:uppercase; color:var(--ink-faint); margin:0 0 var(--sp-2); }
+  nav.toc ol { list-style:none; margin:0; padding:0; counter-reset:toc; }
+  nav.toc li { margin:0 0 .15rem; }
+  nav.toc a { display:block; padding:.34rem .6rem; border-radius:var(--radius-sm); color:var(--ink-dim); text-decoration:none; border-left:2px solid transparent; }
+  nav.toc a:hover { color:var(--ink); background:var(--surface-2); }
+  nav.toc a:focus-visible { outline:2px solid var(--focus); outline-offset:2px; }
+
+  main { min-width:0; }
+  section { margin:0 0 var(--sp-6); scroll-margin-top:1.5rem; }
+  section > h2 { font-family:var(--sans); font-weight:700; font-size:clamp(1.4rem,3vw,1.9rem); letter-spacing:-.018em; line-height:1.12; margin:0 0 var(--sp-3); padding-top:var(--sp-2); }
+  .sec-num { font-family:var(--mono); font-weight:500; font-size:.8em; color:var(--accent-text); margin-right:.5rem; }
+  h3 { font-family:var(--sans); font-weight:600; font-size:1.12rem; letter-spacing:-.01em; margin:var(--sp-4) 0 var(--sp-2); }
+  p { margin:0 0 var(--sp-3); max-width:68ch; }
+  strong { font-weight:600; color:var(--ink); }
+  em { font-style:italic; }
+  a { color:var(--accent-text); text-decoration:underline; text-underline-offset:2px; text-decoration-thickness:1px; }
+  ul,ol { max-width:68ch; padding-left:1.3rem; margin:0 0 var(--sp-3); }
+  li { margin:0 0 .4rem; }
+  li::marker { color:var(--ink-faint); }
+
+  /* checklist */
+  ul.check { list-style:none; padding-left:0; }
+  ul.check li { position:relative; padding-left:1.8rem; }
+  ul.check li::before { content:""; position:absolute; left:0; top:.52em; width:.75rem; height:.42rem; border-left:2px solid var(--accent); border-bottom:2px solid var(--accent); transform:rotate(-45deg); }
+
+  /* phases */
+  .phase { display:flex; gap:var(--sp-3); padding:var(--sp-3) 0; border-top:1px solid var(--hairline); }
+  .phase:last-child { border-bottom:1px solid var(--hairline); }
+  .phase .n { flex:0 0 auto; font-family:var(--serif); font-weight:600; font-size:1.5rem; color:var(--accent-text); line-height:1; width:2.2rem; }
+  .phase .body { min-width:0; }
+  .phase h3 { margin:0 0 .5rem; font-size:1.08rem; }
+  .phase .tag { font-family:var(--mono); font-size:.66rem; letter-spacing:.1em; text-transform:uppercase; padding:.15rem .45rem; border-radius:4px; margin-left:.5rem; vertical-align:.12em; }
+  .tag.social { color:var(--warn); background:var(--warn-quiet); }
+  .tag.tech { color:var(--accent-text); background:var(--accent-quiet); }
+  .phase p { margin:.3rem 0; font-size:.96rem; }
+  .phase .lbl { font-weight:600; color:var(--ink); }
+
+  /* callouts */
+  .call { border:1px solid var(--hairline); border-left:3px solid var(--accent); background:var(--surface); border-radius:var(--radius-sm); padding:var(--sp-3); margin:0 0 var(--sp-3); }
+  .call p:last-child { margin-bottom:0; }
+  .call .k { font-family:var(--mono); font-size:.68rem; letter-spacing:.12em; text-transform:uppercase; display:block; margin-bottom:.4rem; }
+  .call.truth { border-left-color:var(--accent); } .call.truth .k { color:var(--accent-text); }
+  .call.warn { border-left-color:var(--warn); background:var(--warn-quiet); } .call.warn .k { color:var(--warn); }
+  .call.gap { border-left-color:var(--bad); background:var(--bad-quiet); } .call.gap .k { color:var(--bad); }
+  .call.good { border-left-color:var(--good); background:var(--good-quiet); } .call.good .k { color:var(--good); }
+
+  /* code */
+  pre { background:var(--code-bg); color:var(--code-ink); border-radius:var(--radius); padding:var(--sp-3); overflow-x:auto; margin:0 0 var(--sp-3); border:1px solid var(--hairline-strong); }
+  pre code { font-family:var(--mono); font-size:.82rem; line-height:1.6; background:none; padding:0; color:inherit; white-space:pre; }
+  code { font-family:var(--mono); font-size:.86em; background:var(--surface-2); padding:.1rem .34rem; border-radius:4px; color:var(--accent-text); }
+  pre code .c { color:var(--code-faint); } pre code .a { color:var(--code-accent); }
+
+  /* tables */
+  .tablewrap { overflow-x:auto; margin:0 0 var(--sp-3); border:1px solid var(--hairline); border-radius:var(--radius); }
+  table { border-collapse:collapse; width:100%; font-size:.92rem; min-width:460px; }
+  th,td { text-align:left; padding:.6rem .8rem; border-bottom:1px solid var(--hairline); vertical-align:top; }
+  thead th { font-family:var(--mono); font-size:.72rem; letter-spacing:.06em; text-transform:uppercase; color:var(--ink-dim); background:var(--surface-2); }
+  tbody tr:last-child td { border-bottom:0; }
+  td .yes { color:var(--good); font-weight:600; } td .no { color:var(--bad); font-weight:600; }
+  th[scope=row] { font-weight:600; color:var(--ink); white-space:nowrap; }
+
+  .q { font-family:var(--serif); font-size:1.15rem; color:var(--ink); font-weight:600; margin:var(--sp-4) 0 var(--sp-2); }
+  hr { border:0; border-top:1px solid var(--hairline); margin:var(--sp-5) 0; }
+  footer.site { border-top:1px solid var(--hairline); padding:var(--sp-4) 0 var(--sp-6); color:var(--ink-faint); font-size:.85rem; }
+  footer.site .mono { font-family:var(--mono); }
+  .skip { position:absolute; left:-9999px; }
+  .skip:focus { left:1rem; top:1rem; position:fixed; background:var(--accent); color:var(--on-accent); padding:.6rem 1rem; border-radius:var(--radius-sm); z-index:10; }
+</style>
+</head>
+<body>
+<a href="#overview" class="skip">Skip to content</a>
+<div class="wrap">
+
+<header class="site">
+  <p class="eyebrow">Ejentic &middot; Internal playbook</p>
+  <h1>RAG Engagement Field Guide</h1>
+  <p class="lede">How a client RAG system goes from first handshake to a maintained, clearance-aware knowledge base — the technical half and the social half, with the parts that actually sink projects called out.</p>
+  <div class="toolbar">
+    <button class="toggle" id="themeToggle" type="button" aria-label="Toggle light and dark theme">
+      <span id="themeLabel">Theme: system</span>
+    </button>
+    <span class="stamp">Rev. 2026-10-15 &middot; grounded in ejentic-rag-system</span>
+  </div>
+</header>
+
+<div class="layout">
+  <nav class="toc" aria-label="Contents">
+    <p class="toc-h">Contents</p>
+    <ol>
+      <li><a href="#overview">The 20 / 80 truth</a></li>
+      <li><a href="#lifecycle">Engagement lifecycle</a></li>
+      <li><a href="#clearance">Clearance &amp; data entry</a></li>
+      <li><a href="#data">Getting scattered data in</a></li>
+      <li><a href="#addremove">Adding &amp; removing knowledge</a></li>
+      <li><a href="#enforcement">How clearance is enforced</a></li>
+      <li><a href="#proving">Proving it works</a></li>
+      <li><a href="#intake">Client intake questionnaire</a></li>
+      <li><a href="#truths">Hard truths</a></li>
+      <li><a href="#pricing">Pricing frame</a></li>
+    </ol>
+  </nav>
+
+  <main id="overview">
+    <section>
+      <h2><span class="sec-num">00</span>The 20 / 80 truth</h2>
+      <p>The retrieval engine — embeddings, Pinecone, reranking, the clearance filter — is maybe <strong>20%</strong> of a real engagement. It is largely built and reusable. The other <strong>80%</strong> is getting a company's messy, scattered, half-written-down knowledge into a <em>clean, correctly-labelled corpus</em>, and earning the trust and governance to do it. That 80% is the work clients pay for and the reason this is an agency, not a product download.</p>
+      <div class="call truth">
+        <span class="k">Hold this the whole way through</span>
+        <p>Every phase below is really in service of one thing: a corpus that is <strong>accurate, current, de-duplicated, and tagged with the right clearance on every chunk</strong>. The machine only ever reflects the corpus you feed it.</p>
+      </div>
+    </section>
+
+    <section id="lifecycle">
+      <h2><span class="sec-num">01</span>Engagement lifecycle</h2>
+      <p>Ten phases, handshake to maintained system. Each has a <span class="tag social">social</span> half and a <span class="tag tech">technical</span> half — they interleave, they are not sequential silos.</p>
+
+      <div class="phase">
+        <div class="n">0</div>
+        <div class="body">
+          <h3>Qualify <span class="tag social">social</span></h3>
+          <p>First call. What's the problem, who asks the questions, and <em>is RAG even the right tool?</em> If the answers aren't written down <strong>anywhere</strong>, retrieval can't find them. If they need live/real-time data, that's not RAG. Saying "no, not yet" here saves a doomed project and builds trust.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">1</div>
+        <div class="body">
+          <h3>Discovery &amp; scope <span class="tag social">social</span> <span class="tag tech">technical</span></h3>
+          <p><span class="lbl">Social:</span> use cases; the <em>first question</em> their users will ask; the roles/tiers (this becomes <code>clearance_levels</code>); compliance posture; what "success" means in a sentence.</p>
+          <p><span class="lbl">Technical:</span> hosting decision — cloud vs <strong>on-prem / VPC</strong> (the engine supports both; sensitive clients demand on-prem). Draft the clearance taxonomy.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">2</div>
+        <div class="body">
+          <h3>Agreement &amp; trust <span class="tag social">social</span></h3>
+          <p><strong>NDA + data-processing agreement BEFORE any data moves.</strong> This is a hard gate, not a formality. Pricing = a <strong>setup fee</strong> (the data-prep labour) + a <strong>monthly retainer</strong> (hosting + maintenance + support). See the Pricing frame below.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">3</div>
+        <div class="body">
+          <h3>Data gathering <span class="tag social">social</span> <span class="tag tech">technical</span></h3>
+          <p><span class="lbl">Social / logistics:</span> secure transfer; inventory <em>every</em> source — digital docs, PDFs, scans, printed binders, and <strong>word-of-mouth</strong>; name the information-owner per domain; agree the clearance taxonomy with them.</p>
+          <p><span class="lbl">Technical:</span> stand up the isolated tenant shell — its own Pinecone namespace, its own keys. A client's data never shares a namespace with another's.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">4</div>
+        <div class="body">
+          <h3>Corpus engineering <span class="tag tech">technical</span> <span class="tag social">social</span> &mdash; the 80%</h3>
+          <p><span class="lbl">Technical:</span> extract &rarr; clean &rarr; <strong>dedupe &amp; reconcile</strong> &rarr; chunk &rarr; tag. Output is the knowledge file of <code>{text, clearance}</code> entries. (Full detail in <a href="#data">Getting scattered data in</a>.)</p>
+          <p><span class="lbl">Social:</span> sit with each information-owner to assign the clearance tag and to settle "which version is current?" This is a review, not a solo task.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">5</div>
+        <div class="body">
+          <h3>Build &amp; configure <span class="tag tech">technical</span></h3>
+          <p>New tenant config (namespace, embed model, <code>clearance_levels</code>, a key per tier, persona/prompt, retrieval knobs); ingest; wire auth; and the <strong>identity &rarr; key integration</strong> with the client's own login/SSO (see <a href="#enforcement">How clearance is enforced</a>). Realise the hosting choice from phase 1.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">6</div>
+        <div class="body">
+          <h3>Evaluate <span class="tag tech">technical</span></h3>
+          <p>Build an eval set; LLM-as-judge; <strong>leak tests across every tier</strong> (a lower tier must never retrieve a higher tier's content); and the "first question answers <em>completely</em>" check. Then tune the knobs — <code>retrieve_top_k</code>, <code>rerank_top_n</code>, <code>confidence_threshold</code>.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">7</div>
+        <div class="body">
+          <h3>Pilot / UAT <span class="tag social">social</span> <span class="tag tech">technical</span></h3>
+          <p>Real users across tiers try it. You <strong>will</strong> find missing answers (corpus gaps) and mis-tags. Fix, re-tag, re-ingest, iterate. Budget for this; it is not a sign something went wrong.</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">8</div>
+        <div class="body">
+          <h3>Go-live <span class="tag tech">technical</span> <span class="tag social">social</span></h3>
+          <p><span class="lbl">Technical:</span> production hosting, the audit trail (who asked what), rate limits, monitoring. <span class="lbl">Social:</span> training, handover, and a channel for "this answer was wrong / missing."</p>
+        </div>
+      </div>
+      <div class="phase">
+        <div class="n">9</div>
+        <div class="body">
+          <h3>Operate <span class="tag social">social</span> <span class="tag tech">technical</span> &mdash; the retainer</h3>
+          <p>Knowledge rots. New documents, superseded policies, re-ingestion, eval-regression checks, support. This is the recurring revenue and the reason the engagement never truly "ends."</p>
+        </div>
+      </div>
+    </section>
+
+    <section id="clearance">
+      <h2><span class="sec-num">02</span>Clearance &amp; data entry</h2>
+      <p>"How do I say this chunk is staff-only or executive-only?" is <strong>two separate decisions, in two places</strong> — and only one of them is technical.</p>
+
+      <h3>(a) The tag — per chunk, in the source, at ingestion</h3>
+      <p>Every entry in the knowledge file carries a <code>clearance</code> tag. The ingestion script is the <em>only</em> writer to the vector store and it <strong>validates every record has a valid tag before it uploads a single one</strong> — miss or mistag one and it refuses the whole batch, so you can't accidentally ship an untagged (and therefore invisible) document.</p>
+      <pre><code>{ "text": "Support hours are 07:00&ndash;19:00 WAT, Mon&ndash;Sat.", "clearance": "public" }
+{ "text": "Late-shipment escalation runbook: hour 0&ndash;4 ...",  "clearance": "internal" }
+{ "text": "Q3 board revenue was ... the acquisition target ...", "clearance": "executive" }</code></pre>
+
+      <h3>(b) The visibility rule — once, in the client config</h3>
+      <p>The <code>clearance_levels</code> block maps each role to the tags it may see. This real example is the demo tenant's config:</p>
+      <pre><code><span class="c">// clients/&lt;client&gt;.json</span>
+"clearance_tags":  ["public", "internal", "executive"],
+"clearance_levels": {
+  <span class="a">"guest"</span>:     ["public"],
+  <span class="a">"employee"</span>:  ["public", "internal"],
+  <span class="a">"executive"</span>:  "*"
+}</code></pre>
+      <p>That block <em>is</em> the literal answer to "who sees staff vs executive": <code>employee</code> sees public + internal; <code>executive</code> (<code>"*"</code>) sees everything. A client with more tiers (add <code>legal</code>, <code>finance</code>) is just more tags and more rows here — no code change.</p>
+
+      <div class="call warn">
+        <span class="k">The non-technical punchline</span>
+        <p>We do <strong>not</strong> decide a document's tag — the client does. "This is executive-only" is a governance call only they can make. Our job is the process that gets those decisions out of their heads onto every chunk, plus the machine that enforces them. The number-one failure mode is <strong>mis-tagging</strong>: too open is a leak; too closed makes the knowledge base "look empty" to normal users. So tagging is a <strong>client-owned review step</strong>, never something we do alone.</p>
+      </div>
+    </section>
+
+    <section id="data">
+      <h2><span class="sec-num">03</span>Getting scattered data in</h2>
+      <p>Everything converges to the same <code>{text, clearance}</code> shape. The format it arrives in only changes how much <em>preparation</em> it needs:</p>
+      <ul>
+        <li><strong>Clean digital</strong> (Word, Confluence, Notion, a database): export &rarr; text. Easiest.</li>
+        <li><strong>Digital PDFs:</strong> text extraction — <code>pypdf</code> is already in the stack.</li>
+        <li><strong>Scanned PDFs / printed binders / books:</strong> scan &rarr; <strong>OCR</strong> (Tesseract or a cloud OCR) &rarr; heavy cleanup. OCR output is noisy and needs a human pass.</li>
+        <li><strong>Word of mouth / tribal knowledge:</strong> the hardest <em>and</em> most valuable. Structured interviews with the people who know &rarr; transcribe &rarr; rewrite into canonical Q&amp;A / policy statements. A huge share of a company's real know-how lives only here, so <strong>the interview is the ingestion pipeline</strong>.</li>
+      </ul>
+      <div class="call gap">
+        <span class="k">Honest gap</span>
+        <p>OCR is <strong>not</strong> in the pipeline today. The ingestion step takes an already-prepared knowledge file; extraction and transcription happen upstream, per engagement, and the scanned/printed path needs OCR tooling added. Scope it in when a client's data is on paper.</p>
+      </div>
+      <div class="call truth">
+        <span class="k">The principle that saves projects</span>
+        <p>Before indexing: <strong>fix the corpus</strong>. Duplicate policies and superseded versions sabotage retrieval more than any chunking strategy saves it. We learned this the hard way — an entire service offering once vanished from answers because three overlapping document versions fought each other in the reranker. Dedupe and reconcile to <em>one canonical answer per question</em>.</p>
+      </div>
+    </section>
+
+    <section id="addremove">
+      <h2><span class="sec-num">04</span>Adding &amp; removing knowledge</h2>
+      <p>The whole model in one line: <strong>the knowledge file(s) are the single source of truth; ingestion syncs the vector store to them.</strong></p>
+
+      <p class="q">Does "upload a PDF and ask" add that doc to the knowledge base permanently?</p>
+      <div class="call good">
+        <span class="k">No &mdash; ephemeral and isolated, by design</span>
+        <p>An uploaded PDF is indexed into a <strong>separate, in-memory index keyed by an unguessable token</strong> the uploader gets back — not a Pinecone upsert. It is capped (LRU, a handful at a time) and evaporates on restart. It is <strong>never</strong> added to the permanent corpus and <strong>never</strong> visible to another user. (This was once a real bug — uploads leaked into a process-wide index everyone could read — and it was deliberately removed.)</p>
+      </div>
+
+      <p class="q">How do we remove an out-of-date document so the RAG stops citing it?</p>
+      <p>Today: <strong>remove it from the knowledge file and re-ingest.</strong> A clean rebuild wipes the namespace and re-uploads the current file, so the vector store can never drift from the file. Simple, safe, auditable — the file is your record of what is live.</p>
+      <div class="call gap">
+        <span class="k">What's missing for surgical deletion</span>
+        <p>Chunks are currently tagged with a <strong>positional</strong> <code>doc_id</code> (the index in the source list), not a stable id — so there is no reliable handle to delete <em>one</em> specific document. The vector store can delete by id or metadata filter; we just don't expose it safely yet. A client-facing "retire this document" button needs us to add a <strong>stable per-doc id</strong> (a content hash) first.</p>
+      </div>
+
+      <p class="q">Can clients self-serve uploads (PDF/DOCX &rarr; auto-added &rarr; retrievable)?</p>
+      <p>Feasible, and most plumbing exists (<code>--append</code> ingestion, an admin-gated ingest path, <code>pypdf</code>). But the current "upload &amp; ask" is the <em>ephemeral</em> path above — permanent self-service upload is a <strong>new, separate flow</strong>: authenticated admin upload &rarr; extract (add OCR for scans) &rarr; <strong>uploader assigns a clearance tag</strong> &rarr; chunk &rarr; append &rarr; live immediately.</p>
+      <div class="call warn">
+        <span class="k">The real design work is governance, not plumbing</span>
+        <p>Self-service <code>append</code> makes the duplication risk <em>worse</em>: someone uploads policy v2 and never retires v1, so the RAG now holds both and may cite the stale one. So every "add" must force a <strong>clearance choice</strong> and be paired with a <strong>supersede / retire</strong> of the old version — or you rebuild the exact bug from section 03 at scale.</p>
+      </div>
+
+      <h3>Efficient add / remove — the end-state</h3>
+      <ul class="check">
+        <li><strong>Most clients (small corpora):</strong> edit the file, clean rebuild. Nothing to maintain, impossible to drift.</li>
+        <li><strong>Scale / "manage it without us":</strong> add stable doc ids, then incremental <code>append</code> (add) and delete-by-id / supersede (remove) behind an admin screen with forced clearance tagging — no full rebuilds. A clear, bounded build, not research.</li>
+      </ul>
+    </section>
+
+    <section id="enforcement">
+      <h2><span class="sec-num">05</span>How clearance is enforced</h2>
+      <p>This is the security story to tell a technical buyer. It is enforced in the engine, not asserted.</p>
+      <ul>
+        <li><strong>Clearance comes from the key, never a request field.</strong> The caller presents an API key; the server reverse-maps it to a role with a constant-time compare. The request body may ask to see <em>less</em> than the key grants, but asking for <em>more</em> is a hard <code>403</code> — narrow, never widen.</li>
+        <li><strong>Higher material is never retrieved, not merely hidden.</strong> The role's allowed tags become a metadata filter at query time, so out-of-tier chunks are never fetched. A second defence-in-depth guard drops anything mis-tagged if the filter ever regressed.</li>
+        <li><strong>The key is a server-side secret.</strong> End users never see or type it. In production the client's own login / SSO establishes who someone is, and their backend selects the matching key when it calls the RAG — server to server.</li>
+      </ul>
+      <div class="call truth">
+        <span class="k">The identity &rarr; key binding is per-client integration</span>
+        <p>The engine is deliberately key-based so it never has to know about logins. Wiring "this authenticated human &rarr; which key" into a client's Okta / Google Workspace / in-house app is the integration we do per engagement. The public demo collapses this into a free persona dropdown <em>only</em> because its data is fictional — in a real deployment there is no "switch role" button; your tier is a property of how you signed in.</p>
+      </div>
+    </section>
+
+    <section id="proving">
+      <h2><span class="sec-num">06</span>Proving it works</h2>
+      <p>Not vibes — a measured matrix. Pick a known fact at each tier and confirm every lower tier is refused it while the right tier answers. This is the real result from our own tenant (public = "core offers", internal = "Project&nbsp;Delta", executive = "the acquisition + Q2 revenue"):</p>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr><th>Key &darr; / asks &rarr;</th><th>public</th><th>internal</th><th>executive</th></tr>
+          </thead>
+          <tbody>
+            <tr><th scope="row">guest</th><td><span class="yes">answers</span></td><td><span class="no">refuses</span></td><td><span class="no">refuses</span></td></tr>
+            <tr><th scope="row">staff</th><td><span class="yes">answers</span></td><td><span class="yes">answers</span></td><td><span class="no">refuses</span></td></tr>
+            <tr><th scope="row">executive</th><td><span class="yes">answers</span></td><td><span class="yes">answers</span></td><td><span class="yes">answers</span></td></tr>
+          </tbody>
+        </table>
+      </div>
+      <p>A clean ladder: guest sees only public; staff sees public + internal but is refused executive; executive sees everything. No higher-tier content ever leaked down, refusals are a graceful "I don't have that," and the first-question answer was complete at every tier. Re-run this matrix after every corpus change — it is the regression test that matters.</p>
+    </section>
+
+    <section id="intake">
+      <h2><span class="sec-num">07</span>Client intake questionnaire</h2>
+      <p>Run the first working meeting from this. The answers populate scope, the clearance taxonomy, hosting, and the data plan.</p>
+      <h3>Problem &amp; fit</h3>
+      <ul class="check">
+        <li>What question, asked by whom, do you want answered instantly and correctly?</li>
+        <li>Where does the answer live today, and is it actually written down somewhere?</li>
+        <li>What does "this is working" look like in one sentence?</li>
+      </ul>
+      <h3>Roles &amp; clearance (&rarr; <code>clearance_levels</code>)</h3>
+      <ul class="check">
+        <li>Who are the distinct audiences? (e.g. customer / staff / leadership)</li>
+        <li>Name a document each tier may see that the tier below must not.</li>
+        <li>Who is the information-owner that signs off a document's tier?</li>
+      </ul>
+      <h3>Data sources</h3>
+      <ul class="check">
+        <li>Which systems hold the knowledge? (docs, wiki, DB, email, PDFs)</li>
+        <li>How much is on paper or in scans? How much is only in people's heads?</li>
+        <li>Who are the subject-matter experts we'd interview for the unwritten parts?</li>
+      </ul>
+      <h3>Security, hosting &amp; cadence</h3>
+      <ul class="check">
+        <li>Any regulation / data-residency constraint? Can data leave your environment?</li>
+        <li>Cloud or on-prem / VPC?</li>
+        <li>How will staff log in, and what system already knows their role? (the SSO we bind to)</li>
+        <li>How often does this knowledge change — who tells us when a policy is superseded?</li>
+      </ul>
+    </section>
+
+    <section id="truths">
+      <h2><span class="sec-num">08</span>Hard truths</h2>
+      <ul>
+        <li><strong>The corpus is the product, not the model.</strong> Budget 80% of effort on data, not "AI."</li>
+        <li><strong>Tagging is governance, and it's where leaks come from.</strong> Make it a client-owned review.</li>
+        <li><strong>Tribal knowledge is the gold and the grind.</strong> If it's only in heads, interviews are your ingestion.</li>
+        <li><strong>NDA before data. No exceptions.</strong></li>
+        <li><strong>Eval proves it; vibes don't.</strong> Leak tests + answer quality, measured, re-run on every change.</li>
+        <li><strong>It's never "done."</strong> The retainer isn't padding — a stale corpus degrades every week.</li>
+        <li><strong>This is why it's an agency, not a SaaS.</strong> The defensible, paid, hard work is the human + data + governance labour. The engine is the easy, copyable part.</li>
+      </ul>
+    </section>
+
+    <section id="pricing">
+      <h2><span class="sec-num">09</span>Pricing frame</h2>
+      <p>Two components, matched to where the cost actually is:</p>
+      <ul>
+        <li><strong>Setup fee</strong> — covers corpus engineering (extraction, interviews, dedupe, tagging, eval). This is the bulk of the labour and should be priced as such, not as "installing software."</li>
+        <li><strong>Monthly retainer</strong> — covers hosting + corpus maintenance + support. It exists because knowledge rots and the system needs tending.</li>
+      </ul>
+      <div class="call warn">
+        <span class="k">Numbers live in one place</span>
+        <p>This guide names <strong>no figures on purpose</strong>. Actual setup/retainer pricing, AI + hosting cost, and margin-per-client come from the agency P&amp;L model (<code>~/metrics</code>). Never quote a number that didn't come from there.</p>
+      </div>
+    </section>
+  </main>
+</div>
+
+<footer class="site">
+  <p>RAG Engagement Field Guide &middot; grounded in the <span class="mono">ejentic-rag-system</span> codebase as of 2026-10-15. Technical claims (clearance tagging, key-based enforcement, ephemeral uploads, the deletion model) reflect the code verified on that date — re-check against the source before quoting them as fact to a client.</p>
+</footer>
+
+</div>
+<script>
+  (function () {
+    var root = document.documentElement, btn = document.getElementById('themeToggle'), label = document.getElementById('themeLabel');
+    function current() { return root.getAttribute('data-theme') || 'system'; }
+    function render() {
+      var c = current();
+      label.textContent = 'Theme: ' + c;
+    }
+    function set(mode) {
+      try {
+        if (mode === 'system') { root.removeAttribute('data-theme'); localStorage.removeItem('rag-fg-theme'); }
+        else { root.setAttribute('data-theme', mode); localStorage.setItem('rag-fg-theme', mode); }
+      } catch (e) {
+        if (mode === 'system') root.removeAttribute('data-theme'); else root.setAttribute('data-theme', mode);
+      }
+      render();
+    }
+    btn.addEventListener('click', function () {
+      // cycle: system -> light -> dark -> system
+      var c = current();
+      set(c === 'system' ? 'light' : c === 'light' ? 'dark' : 'system');
+    });
+    render();
+  })();
+</script>
+</body>
+</html>
